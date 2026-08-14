@@ -68,6 +68,73 @@ const H = canvas.height;
 
 // ---------- 游戏状态 ----------
 let game = null;
+let audioContext = null;
+
+function ensureAudio() {
+  if (!audioContext) {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) return null;
+    audioContext = new AudioContextCtor();
+  }
+  if (audioContext.state === "suspended") audioContext.resume().catch(() => {});
+  return audioContext;
+}
+
+function playKillSound() {
+  const audio = ensureAudio();
+  if (!audio) return;
+  const now = audio.currentTime;
+  // 快速错开的金属音符，模拟一串硬币连续落地。
+  const notes = [
+    [0.00, 1320, 0.085], [0.035, 1760, 0.075], [0.082, 1490, 0.09],
+    [0.13, 2120, 0.07], [0.17, 1870, 0.085], [0.22, 2440, 0.065],
+    [0.27, 2040, 0.10],
+  ];
+  for (const [delay, frequency, duration] of notes) {
+    const start = now + delay;
+    const end = start + duration;
+    const coin = audio.createOscillator();
+    const overtone = audio.createOscillator();
+    const coinGain = audio.createGain();
+    const overtoneGain = audio.createGain();
+    coin.type = "triangle";
+    overtone.type = "sine";
+    coin.frequency.setValueAtTime(frequency, start);
+    coin.frequency.exponentialRampToValueAtTime(frequency * 0.62, end);
+    overtone.frequency.setValueAtTime(frequency * 2.03, start);
+    overtone.frequency.exponentialRampToValueAtTime(frequency * 1.35, end);
+    coinGain.gain.setValueAtTime(0.0001, start);
+    coinGain.gain.exponentialRampToValueAtTime(0.065, start + 0.004);
+    coinGain.gain.exponentialRampToValueAtTime(0.0001, end);
+    overtoneGain.gain.setValueAtTime(0.0001, start);
+    overtoneGain.gain.exponentialRampToValueAtTime(0.028, start + 0.003);
+    overtoneGain.gain.exponentialRampToValueAtTime(0.0001, end - 0.002);
+    coin.connect(coinGain);
+    overtone.connect(overtoneGain);
+    coinGain.connect(audio.destination);
+    overtoneGain.connect(audio.destination);
+    coin.start(start); coin.stop(end);
+    overtone.start(start); overtone.stop(end);
+  }
+
+  // 极短的高频噪声，补一点硬币互相敲击的颗粒感。
+  const length = Math.floor(audio.sampleRate * 0.025);
+  const buffer = audio.createBuffer(1, length, audio.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
+  const noise = audio.createBufferSource();
+  const filter = audio.createBiquadFilter();
+  const noiseGain = audio.createGain();
+  filter.type = "highpass";
+  filter.frequency.setValueAtTime(2600, now);
+  noiseGain.gain.setValueAtTime(0.025, now);
+  noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.025);
+  noise.buffer = buffer;
+  noise.connect(filter);
+  filter.connect(noiseGain);
+  noiseGain.connect(audio.destination);
+  noise.start(now); noise.stop(now + 0.025);
+}
 
 // ---------- 工具函数 ----------
 function rand(a, b) { return a + Math.random() * (b - a); }
@@ -711,30 +778,44 @@ class Game {
       this.trackTimer -= dt;
       if (this.trackTimer <= 0) {
         this.trackTimer = 0.5;
-        this.homingBullets.push({ x: this.player.x, y: this.player.y - this.player.r - 6, speed: 380, damage: 1, dead: false });
+        const x = this.player.x;
+        const y = this.player.y - this.player.r - 6;
+        let target = null, targetDistance = Infinity;
+        for (const e of this.enemies) {
+          const distance = (e.x - x) ** 2 + (e.y - y) ** 2;
+          if (distance < targetDistance) {
+            targetDistance = distance;
+            target = e;
+          }
+        }
+        this.homingBullets.push({
+          x, y, speed: 380, damage: 1, dead: false, target,
+          vx: 0, vy: -380,
+        });
       }
     }
     for (const hb of this.homingBullets) {
-      let target = null, td = 1e9;
-      for (const e of this.enemies) {
-        const d = (e.x - hb.x) ** 2 + (e.y - hb.y) ** 2;
-        if (d < td) { td = d; target = e; }
-      }
-      if (target) {
-        const dx = target.x - hb.x, dy = target.y - hb.y;
+      const targetActive = hb.target && !hb.target.gone && this.enemies.includes(hb.target);
+      if (targetActive) {
+        const dx = hb.target.x - hb.x, dy = hb.target.y - hb.y;
         const len = Math.hypot(dx, dy) || 1;
-        hb.x += (dx / len) * hb.speed * dt;
-        hb.y += (dy / len) * hb.speed * dt;
-        if (len < target.r + 5) {
+        hb.vx = (dx / len) * hb.speed;
+        hb.vy = (dy / len) * hb.speed;
+        hb.x += hb.vx * dt;
+        hb.y += hb.vy * dt;
+        if (Math.hypot(hb.target.x - hb.x, hb.target.y - hb.y) < hb.target.r + 5) {
           hb.dead = true;
-          const killed = target.hit(hb.damage);
+          const killed = hb.target.hit(hb.damage);
           this.addParticles(hb.x, hb.y, "#ffe066", 5, 0.6);
-          if (killed) this.killEnemy(target);
+          if (killed) this.killEnemy(hb.target);
         }
       } else {
-        hb.y -= hb.speed * dt; // 无目标时直线飞出
-        if (hb.y < -20) hb.dead = true;
+        // 锁定目标失效后保留最后速度，不再搜索或切换到其他目标。
+        hb.target = null;
+        hb.x += hb.vx * dt;
+        hb.y += hb.vy * dt;
       }
+      if (hb.x < -20 || hb.x > W + 20 || hb.y < -20 || hb.y > H + 20) hb.dead = true;
     }
     this.homingBullets = this.homingBullets.filter(hb => !hb.dead);
 
@@ -785,6 +866,7 @@ class Game {
     this.enemies.splice(idx, 1);
     this.score += e.score;
     if (countForWave) this.waveKills++;
+    if (countForWave) playKillSound();
     this.addParticles(e.x, e.y, ENEMY_TYPES[e.type].color, 22, 1.4);
     this.addParticles(e.x, e.y, "#ffffff", 8, 1);
     this.shockwaves.push({ x: e.x, y: e.y, r: 5, speed: 240, life: 0.3, maxLife: 0.3, color: ENEMY_TYPES[e.type].color, width: 3 });
@@ -1326,6 +1408,7 @@ function chooseCard(i) {
 }
 
 window.addEventListener("keydown", (e) => {
+  ensureAudio();
   switch (e.code) {
     case "Escape":
       e.preventDefault();
@@ -1351,6 +1434,7 @@ window.addEventListener("keydown", (e) => {
       break;
   }
 });
+canvas.addEventListener("pointerdown", ensureAudio);
 window.addEventListener("keyup", (e) => {
   switch (e.code) {
     case "ArrowLeft": case "KeyA": input.left = false; break;
@@ -1380,6 +1464,26 @@ canvas.addEventListener("click", (e) => {
 // ---------- 主循环 ----------
 let last = performance.now();
 game = new Game();
+
+// Temporary browser QA entry; removed after tracking verification.
+if (new URLSearchParams(location.search).get("preview") === "homing") {
+  game.wave = 3;
+  game.waveState = "fighting";
+  game.item = { id: "track" };
+  game.trackTimer = 0;
+  const qaTarget = new Enemy("tank", 300, 220);
+  const qaOther = new Enemy("tank", 600, 220);
+  for (const e of [qaTarget, qaOther]) {
+    e.phase = "battle";
+    e.wobbleAmp = 0;
+    e.fireTimer = 999;
+  }
+  game.enemies = [qaTarget, qaOther];
+  setTimeout(() => {
+    game.item = null;
+    game.killEnemy(qaTarget, false);
+  }, 350);
+}
 
 function loop(now) {
   const dt = Math.min((now - last) / 1000, 0.05);
