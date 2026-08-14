@@ -69,24 +69,119 @@ const H = canvas.height;
 // ---------- 游戏状态 ----------
 let game = null;
 let killAudioTemplate = null;
+let bombAudioTemplate = null;
+let soundContext = null;
+let soundMasterGain = null;
+const audioSettings = { volume: 0.72, muted: false };
+const activeAudioNodes = new Set();
+
+function effectiveAudioVolume() {
+  return audioSettings.muted ? 0 : audioSettings.volume;
+}
+
+function setAudioVolume(value, unmute = false) {
+  audioSettings.volume = clamp(value, 0, 1);
+  if (unmute) audioSettings.muted = false;
+  for (const sound of activeAudioNodes) sound.volume = sound.baseVolume * effectiveAudioVolume();
+  if (soundMasterGain && soundContext) {
+    soundMasterGain.gain.setTargetAtTime(effectiveAudioVolume(), soundContext.currentTime, 0.01);
+  }
+}
+
+function toggleAudioMute() {
+  audioSettings.muted = !audioSettings.muted;
+  setAudioVolume(audioSettings.volume);
+}
+
+function createAudioTemplate(src, volume) {
+  const audio = new Audio(src);
+  audio.preload = "auto";
+  audio.baseVolume = volume;
+  audio.volume = volume * effectiveAudioVolume();
+  audio.load();
+  return audio;
+}
 
 function ensureAudio() {
   if (!killAudioTemplate) {
-    killAudioTemplate = new Audio("assets/kill-sound.wav");
-    killAudioTemplate.preload = "auto";
-    killAudioTemplate.volume = 0.72;
-    killAudioTemplate.load();
+    killAudioTemplate = createAudioTemplate("assets/kill-sound.wav", 0.72);
   }
+  if (!bombAudioTemplate) bombAudioTemplate = createAudioTemplate("assets/bomb-explosion.wav", 0.78);
   return killAudioTemplate;
 }
 
-function playKillSound() {
-  const template = ensureAudio();
+function playAudioTemplate(template) {
   if (!template) return;
   const sound = template.cloneNode();
-  sound.volume = template.volume;
-  sound.play().catch(() => {});
+  sound.baseVolume = template.baseVolume;
+  sound.volume = sound.baseVolume * effectiveAudioVolume();
+  activeAudioNodes.add(sound);
+  sound.addEventListener("ended", () => activeAudioNodes.delete(sound), { once: true });
+  sound.play().catch(() => activeAudioNodes.delete(sound));
 }
+
+function playKillSound() {
+  playAudioTemplate(ensureAudio());
+}
+
+function playBombSound() {
+  ensureAudio();
+  playAudioTemplate(bombAudioTemplate);
+}
+
+function ensureSoundContext() {
+  if (!soundContext) {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) return null;
+    soundContext = new AudioContextCtor();
+    soundMasterGain = soundContext.createGain();
+    soundMasterGain.gain.value = effectiveAudioVolume();
+    soundMasterGain.connect(soundContext.destination);
+  }
+  if (soundContext.state === "suspended") soundContext.resume().catch(() => {});
+  return soundContext;
+}
+
+function playLaserSound() {
+  const audio = ensureSoundContext();
+  if (!audio) return;
+  const now = audio.currentTime;
+  const mix = audio.createGain();
+  const filter = audio.createBiquadFilter();
+  mix.gain.setValueAtTime(0.5, now);
+  filter.type = "lowpass";
+  filter.frequency.setValueAtTime(2600, now);
+  filter.Q.setValueAtTime(1.2, now);
+  mix.connect(filter);
+  filter.connect(soundMasterGain);
+
+  // 先蓄能再放电，形成有重量的科幻激光发射感。
+  const charge = audio.createOscillator();
+  const chargeGain = audio.createGain();
+  charge.type = "triangle";
+  charge.frequency.setValueAtTime(145, now);
+  charge.frequency.exponentialRampToValueAtTime(480, now + 0.14);
+  chargeGain.gain.setValueAtTime(0.0001, now);
+  chargeGain.gain.exponentialRampToValueAtTime(0.09, now + 0.012);
+  chargeGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+  charge.connect(chargeGain);
+  chargeGain.connect(mix);
+  charge.start(now); charge.stop(now + 0.18);
+
+  const zap = audio.createOscillator();
+  const zapGain = audio.createGain();
+  zap.type = "sawtooth";
+  zap.frequency.setValueAtTime(920, now + 0.035);
+  zap.frequency.exponentialRampToValueAtTime(250, now + 0.19);
+  zapGain.gain.setValueAtTime(0.0001, now + 0.035);
+  zapGain.gain.exponentialRampToValueAtTime(0.075, now + 0.045);
+  zapGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.2);
+  zap.connect(zapGain);
+  zapGain.connect(mix);
+  zap.start(now + 0.035); zap.stop(now + 0.2);
+}
+
+const PLAYER_LASER_HIT_RADIUS = 18;
 
 // ---------- 工具函数 ----------
 function rand(a, b) { return a + Math.random() * (b - a); }
@@ -192,10 +287,10 @@ class Bullet {
 
 // ---------- 敌人 ----------
 const ENEMY_TYPES = {
-  scout: { name: "侦察机", hp: 1,  r: 14, speed: 280, score: 10,  color: "#ff6b6b",  fireRate: 0, burstChance: 0 },
-  grunt: { name: "步兵机", hp: 3,  r: 18, speed: 75,  score: 20,  color: "#ffa94d",  fireRate: 2.0, burstChance: 0 },
-  tank:  { name: "装甲机", hp: 9,  r: 26, speed: 38,  score: 50,  color: "#c0a0ff",  fireRate: 2.0, burstChance: 0.35, burst: { min: 3, max: 6 } },
-  elite: { name: "精英机", hp: 40, r: 32, speed: 55,  score: 120, color: "#ff5ec8",  fireRate: 2.4, burstChance: 0 },
+  scout: { name: "侦察机", hp: 1,  r: 14, speed: 280, gold: 10,  color: "#ff6b6b",  fireRate: 0, burstChance: 0 },
+  grunt: { name: "步兵机", hp: 3,  r: 18, speed: 75,  gold: 20,  color: "#ffa94d",  fireRate: 2.0, burstChance: 0 },
+  tank:  { name: "装甲机", hp: 9,  r: 26, speed: 38,  gold: 50,  color: "#c0a0ff",  fireRate: 2.0, burstChance: 0.35, burst: { min: 3, max: 6 } },
+  elite: { name: "精英机", hp: 40, r: 32, speed: 55,  gold: 120, color: "#ff5ec8",  fireRate: 2.4, burstChance: 0 },
 };
 
 class Enemy {
@@ -207,7 +302,7 @@ class Enemy {
     this.hp = t.hp;
     this.r = t.r;
     this.speed = t.speed;
-    this.score = t.score;
+    this.gold = t.gold;
     this.color = t.color;
     this.x = x; this.y = y;
     // 进入屏幕时先向下移动，到位后左右摇摆
@@ -422,7 +517,10 @@ class Player {
     this.fireTimer = 0;
     this.fireInterval = 0.14;
     this.bulletDamage = 1;
-    this.laserCharges = 0; // 激光次数（无前摇，可累积）
+    this.laserCharges = 0;    // 当前激光次数
+    this.maxLaserCharges = 5; // 单局永久激光上限，死亡后恢复
+    this.bombCapacity = 1;    // 每次选择炸弹时获得的数量
+    this.trackShotsPerSecond = 2; // 每次选择追踪道具后的基础射速
     this.shield = 0;       // 护盾值（本回合道具，优先抵挡伤害）
   }
 
@@ -515,6 +613,8 @@ class Player {
 
 // 场上同时存在的敌人上限（防止无限刷怪堆叠）
 const MAX_ALIVE_ENEMIES = 10;
+const SHOP_INTERVAL = 5;
+const SHOP_PRICE = 2000;
 
 // ---------- 主游戏对象 ----------
 class Game {
@@ -531,9 +631,9 @@ class Game {
     this.particles = [];
     this.shockwaves = [];  // 爆炸冲击波圆环
     this.floatTexts = [];
-    this.score = 0;
+    this.gold = 0;
     this.wave = 0;
-    this.waveState = "intermission"; // intermission | fighting | reward | gameover
+    this.waveState = "intermission"; // intermission | fighting | reward | shop | item | gameover
     this.paused = false;
     this.intermissionTimer = 1.6;
     this.waveKills = 0; // 本波已击杀数
@@ -545,6 +645,9 @@ class Game {
     this.mouseX = -1; this.mouseY = -1;
     this.item = null;          // 本回合道具（护盾/炸弹/自动追踪）
     this.itemOptions = null;   // 道具选择卡片
+    this.shopOptions = null;   // 每 5 波开放的永久强化商店
+    this.shopNotice = "";
+    this.shopNoticeTimer = 0;
     this.bomb = null;          // 飞行中的炸弹
     this.homingBullets = [];   // 自动追踪子弹
     this.trackTimer = 0;
@@ -612,6 +715,7 @@ class Game {
     this.time += dt;
     this.muzzle = Math.max(0, this.muzzle - dt);
     this.screenShake = Math.max(0, this.screenShake - dt);
+    this.shopNoticeTimer = Math.max(0, this.shopNoticeTimer - dt);
 
     // 星星滚动
     for (const s of this.stars) {
@@ -627,11 +731,12 @@ class Game {
         this.choiceAnimation = null;
         if (selection.kind === "reward" && this.waveState === "reward") this.applyReward(selection.id);
         else if (selection.kind === "item" && this.waveState === "item") this.applyItem(selection.id);
+        else if (selection.kind === "shop" && this.waveState === "shop") this.applyShopPurchase(selection.id);
       }
       return;
     }
 
-    if (this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "item") return;
+    if (this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "shop" || this.waveState === "item") return;
 
     this.player.update(dt, input, this);
 
@@ -715,7 +820,7 @@ class Game {
     for (const l of this.playerLasers) {
       for (const e of [...this.enemies]) {
         if (l.hit.has(e)) continue;
-        if (Math.abs(e.x - l.x) < 14 + e.r) {
+        if (Math.abs(e.x - l.x) < PLAYER_LASER_HIT_RADIUS + e.r) {
           l.hit.add(e);
           const killed = e.hit(l.damage);
           this.addParticles(e.x, e.y, "#7ef0ff", 6, 0.8);
@@ -725,11 +830,11 @@ class Game {
       }
     }
 
-    // ---- 自动追踪道具：2 发/秒 自动攻击最近敌人 ----
+    // ---- 自动追踪道具：基础 2 发/秒，商店强化可永久叠加 ----
     if (this.item && this.item.id === "track" && this.enemies.length > 0) {
       this.trackTimer -= dt;
       if (this.trackTimer <= 0) {
-        this.trackTimer = 0.5;
+        this.trackTimer = 1 / this.player.trackShotsPerSecond;
         const x = this.player.x;
         const y = this.player.y - this.player.r - 6;
         let target = null, targetDistance = Infinity;
@@ -787,6 +892,7 @@ class Game {
         const bx = this.bomb.x, by = Math.max(this.bomb.y, this.bomb.r);
         this.bomb = null;
         this.explosion(bx, by, "#ffd43b", 1.4);
+        playBombSound();
         this.floatTexts.push(new FloatText(bx, by - 26, "轰!", "#ffd43b", 24));
         const R = 95;
         for (const e of [...this.enemies]) {
@@ -816,14 +922,14 @@ class Game {
     const idx = this.enemies.indexOf(e);
     if (idx === -1) return;
     this.enemies.splice(idx, 1);
-    this.score += e.score;
+    this.gold += e.gold;
     if (countForWave) this.waveKills++;
     if (countForWave) playKillSound();
     this.addParticles(e.x, e.y, ENEMY_TYPES[e.type].color, 22, 1.4);
     this.addParticles(e.x, e.y, "#ffffff", 8, 1);
     this.shockwaves.push({ x: e.x, y: e.y, r: 5, speed: 240, life: 0.3, maxLife: 0.3, color: ENEMY_TYPES[e.type].color, width: 3 });
     this.screenShake = 0.18;
-    this.floatTexts.push(new FloatText(e.x, e.y, "+" + e.score, "#7ef0ff", 13));
+    this.floatTexts.push(new FloatText(e.x, e.y, "+" + e.gold, "#ffd43b", 13));
     // 刷够本波配额：停止刷怪，场上剩余敌人全部爆炸清场
     if (this.waveState === "fighting" && this.waveKills >= this.waveQuota) {
       this.clearWave();
@@ -859,6 +965,28 @@ class Game {
     }
   }
 
+  openItemSelection() {
+    this.waveState = "item";
+    this.itemOptions = [
+      { id: "shield", name: "护盾",     icon: "◈" },
+      { id: "bomb",   name: "炸弹",     icon: "●" },
+      { id: "track",  name: "自动追踪", icon: "◎" },
+    ];
+    this.rewardHover = -1;
+  }
+
+  openShop() {
+    this.waveState = "shop";
+    this.shopOptions = [
+      { id: "laserCapacity", name: "激光充能", price: SHOP_PRICE, iconType: "laser" },
+      { id: "bombCapacity",  name: "炸弹补给", price: SHOP_PRICE, iconType: "bomb" },
+      { id: "trackRate",     name: "追踪火炮", price: SHOP_PRICE, iconType: "track" },
+    ];
+    this.shopNotice = "";
+    this.shopNoticeTimer = 0;
+    this.rewardHover = -1;
+  }
+
   // 选择增益（1/2/3 键或鼠标点击）
   applyReward(id) {
     const p = this.player;
@@ -868,21 +996,35 @@ class Game {
     } else if (id === "speed") {
       p.fireInterval = Math.max(0.05, p.fireInterval * 0.95);
     } else if (id === "laser") {
-      p.laserCharges += 5;
+      p.laserCharges = Math.min(p.maxLaserCharges, p.laserCharges + 5);
     }
     this.waveState = "intermission";
     this.intermissionTimer = 1.5;
     this.rewardOptions = null;
+    if (this.wave % SHOP_INTERVAL === 0) this.openShop();
     // 从第 3 波起：开战前再选择本回合一次性道具
-    if (this.wave + 1 >= 3) {
-      this.waveState = "item";
-      this.itemOptions = [
-        { id: "shield", name: "护盾",     icon: "◈" },
-        { id: "bomb",   name: "炸弹",     icon: "●" },
-        { id: "track",  name: "自动追踪", icon: "◎" },
-      ];
-      this.rewardHover = -1;
-    }
+    else if (this.wave + 1 >= 3) this.openItemSelection();
+  }
+
+  applyShopPurchase(id) {
+    const option = this.shopOptions && this.shopOptions.find(item => item.id === id);
+    if (!option || this.gold < option.price) return false;
+    this.gold -= option.price;
+    if (id === "laserCapacity") this.player.maxLaserCharges++;
+    else if (id === "bombCapacity") this.player.bombCapacity++;
+    else if (id === "trackRate") this.player.trackShotsPerSecond++;
+    this.shopOptions = null;
+    this.shopNotice = "";
+    this.openItemSelection();
+    return true;
+  }
+
+  leaveShop() {
+    if (this.waveState !== "shop" || this.choiceAnimation) return false;
+    this.shopOptions = null;
+    this.shopNotice = "";
+    this.openItemSelection();
+    return true;
   }
 
   // 选择本回合道具（1/2/3 键或鼠标点击）
@@ -891,7 +1033,7 @@ class Game {
       this.player.shield = 10;
       this.item = { id: "shield" };
     } else if (id === "bomb") {
-      this.item = { id: "bomb", count: 1 };
+      this.item = { id: "bomb", count: this.player.bombCapacity };
     } else if (id === "track") {
       this.item = { id: "track" };
       this.trackTimer = 0;
@@ -943,7 +1085,7 @@ class Game {
 
   // 根据鼠标坐标返回选中的卡片索引（-1 = 未选中；增益/道具共用布局）
   cardAt(mx, my) {
-    const opts = this.rewardOptions || this.itemOptions;
+    const opts = this.rewardOptions || this.shopOptions || this.itemOptions;
     if (!opts || this.choiceAnimation || mx < 0 || my < 0) return -1;
     const { cw, ch, gap, x0, y0 } = this.choiceCardLayout();
     for (let i = 0; i < opts.length; i++) {
@@ -951,6 +1093,17 @@ class Game {
       if (mx >= x && mx <= x + cw && my >= y0 && my <= y0 + ch) return i;
     }
     return -1;
+  }
+
+  shopExitRect() {
+    const { ch, y0 } = this.choiceCardLayout();
+    return { x: W / 2 - 72, y: y0 + ch + 30, w: 144, h: 38 };
+  }
+
+  shopExitAt(mx, my) {
+    if (this.waveState !== "shop" || this.choiceAnimation) return false;
+    const r = this.shopExitRect();
+    return mx >= r.x && mx <= r.x + r.w && my >= r.y && my <= r.y + r.h;
   }
 
   choiceAccent(id) {
@@ -961,13 +1114,21 @@ class Game {
       shield: "#69dbff",
       bomb: "#ff9f43",
       track: "#ffe066",
+      laserCapacity: "#6ee7ff",
+      bombCapacity: "#ff8c5a",
+      trackRate: "#8ef0c6",
     }[id] || "#7ef0ff";
   }
 
   startChoiceSelection(index) {
-    const opts = this.rewardOptions || this.itemOptions;
+    const opts = this.rewardOptions || this.shopOptions || this.itemOptions;
     if (!opts || this.choiceAnimation || !opts[index]) return false;
-    if (this.waveState !== "reward" && this.waveState !== "item") return false;
+    if (this.waveState !== "reward" && this.waveState !== "shop" && this.waveState !== "item") return false;
+    if (this.waveState === "shop" && this.gold < opts[index].price) {
+      this.shopNotice = "金币不足";
+      this.shopNoticeTimer = 1.2;
+      return false;
+    }
     this.choiceAnimation = {
       index,
       id: opts[index].id,
@@ -980,6 +1141,66 @@ class Game {
     return true;
   }
 
+  drawShopIcon(type, accent, y) {
+    ctx.save();
+    ctx.translate(0, y);
+    ctx.strokeStyle = accent;
+    ctx.fillStyle = accent;
+    ctx.lineWidth = 2.2;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.shadowColor = accent;
+    ctx.shadowBlur = 12;
+
+    if (type === "laser") {
+      ctx.beginPath();
+      ctx.moveTo(0, -18);
+      ctx.lineTo(0, 18);
+      ctx.stroke();
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(0, -10);
+      ctx.lineTo(0, 10);
+      ctx.stroke();
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-13, -12); ctx.lineTo(-7, 0); ctx.lineTo(-13, 12);
+      ctx.moveTo(13, -12); ctx.lineTo(7, 0); ctx.lineTo(13, 12);
+      ctx.stroke();
+    } else if (type === "bomb") {
+      ctx.beginPath();
+      ctx.arc(-2, 3, 13, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.save();
+      ctx.globalAlpha *= 0.2;
+      ctx.fill();
+      ctx.restore();
+      ctx.beginPath();
+      ctx.moveTo(6, -8);
+      ctx.quadraticCurveTo(11, -15, 16, -12);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(16, -17); ctx.lineTo(16, -12);
+      ctx.moveTo(12, -15); ctx.lineTo(16, -12);
+      ctx.moveTo(20, -15); ctx.lineTo(16, -12);
+      ctx.stroke();
+    } else if (type === "track") {
+      ctx.beginPath();
+      ctx.arc(0, 0, 14, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(0, 0, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(0, -20); ctx.lineTo(0, -11);
+      ctx.moveTo(0, 11); ctx.lineTo(0, 20);
+      ctx.moveTo(-20, 0); ctx.lineTo(-11, 0);
+      ctx.moveTo(11, 0); ctx.lineTo(20, 0);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
   drawChoiceCard(opt, cx, cy, w, h, state = {}) {
     const alpha = state.alpha ?? 1;
     if (alpha <= 0) return;
@@ -988,10 +1209,11 @@ class Game {
     const hover = !!state.hover;
     const selected = !!state.selected;
     const back = !!state.back;
-    const accent = this.choiceAccent(opt.id);
+    const disabled = !!state.disabled;
+    const accent = disabled ? "#52657f" : this.choiceAccent(opt.id);
 
     ctx.save();
-    ctx.globalAlpha = alpha;
+    ctx.globalAlpha = alpha * (disabled ? 0.58 : 1);
     ctx.translate(cx, cy);
     ctx.scale(Math.max(0.001, scale * scaleX), Math.max(0.001, scale));
 
@@ -1031,25 +1253,37 @@ class Game {
     } else {
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.font = "32px 'Segoe UI', sans-serif";
-      ctx.fillStyle = hover || selected ? "#ffffff" : accent;
-      ctx.shadowColor = accent;
-      ctx.shadowBlur = hover || selected ? 14 : 5;
-      ctx.fillText(opt.icon, 0, -18);
-      ctx.shadowBlur = 0;
+      const hasPrice = Number.isFinite(opt.price);
+      const iconY = hasPrice ? -27 : -18;
+      if (opt.iconType) {
+        this.drawShopIcon(opt.iconType, hover || selected ? "#ffffff" : accent, iconY);
+      } else {
+        ctx.font = "32px 'Segoe UI', sans-serif";
+        ctx.fillStyle = hover || selected ? "#ffffff" : accent;
+        ctx.shadowColor = accent;
+        ctx.shadowBlur = hover || selected ? 14 : 5;
+        ctx.fillText(opt.icon, 0, iconY);
+        ctx.shadowBlur = 0;
+      }
       ctx.font = "bold 19px 'Segoe UI', sans-serif";
-      ctx.fillStyle = hover || selected ? "#ffffff" : "#dcebff";
-      ctx.fillText(opt.name, 0, 28);
+      ctx.fillStyle = disabled ? "#8b9bb2" : hover || selected ? "#ffffff" : "#dcebff";
+      ctx.fillText(opt.name, 0, hasPrice ? 16 : 28);
+      if (hasPrice) {
+        ctx.font = "bold 14px 'Segoe UI', sans-serif";
+        ctx.fillStyle = disabled ? "#ff8d8d" : "#ffd43b";
+        ctx.fillText("金币 " + opt.price.toLocaleString("zh-CN"), 0, 47);
+      }
     }
     ctx.restore();
   }
 
   // 发射玩家激光（无前摇，消耗 1 次）
   firePlayerLaser() {
-    if (this.paused || this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "item") return false;
+    if (this.paused || this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "shop" || this.waveState === "item") return false;
     if (this.player.laserCharges <= 0) return false;
     this.player.laserCharges--;
     this.playerLasers.push({ x: this.player.x, t: 0.35, damage: 20, hit: new Set() });
+    playLaserSound();
     this.screenShake = Math.max(this.screenShake, 0.15);
     return true;
   }
@@ -1062,9 +1296,100 @@ class Game {
   }
 
   togglePause() {
-    // 增益/道具选择界面本身需要等待玩家操作，不额外叠加暂停状态。
-    if (this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "item") return;
+    // 增益/商店/道具界面本身需要等待玩家操作，不额外叠加暂停状态。
+    if (this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "shop" || this.waveState === "item") return;
     this.paused = !this.paused;
+  }
+
+  pauseAudioLayout() {
+    const centerY = H / 2 + 92;
+    return {
+      panel: { x: W / 2 - 220, y: H / 2 + 50, w: 440, h: 118 },
+      mute: { x: W / 2 - 166, y: centerY - 20, w: 40, h: 40 },
+      slider: { x: W / 2 - 102, y: centerY, w: 230, h: 8 },
+    };
+  }
+
+  pauseAudioControlAt(mx, my) {
+    if (!this.paused) return null;
+    const { mute, slider } = this.pauseAudioLayout();
+    if (mx >= mute.x && mx <= mute.x + mute.w && my >= mute.y && my <= mute.y + mute.h) return "mute";
+    if (mx >= slider.x - 10 && mx <= slider.x + slider.w + 10 && my >= slider.y - 14 && my <= slider.y + 14) return "slider";
+    return null;
+  }
+
+  drawPauseAudioControls() {
+    const { panel, mute, slider } = this.pauseAudioLayout();
+    const hovered = this.pauseAudioControlAt(this.mouseX, this.mouseY);
+    ctx.save();
+    roundedRectPath(panel.x, panel.y, panel.w, panel.h, 10);
+    ctx.fillStyle = "rgba(10,20,38,0.86)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(91,150,206,0.55)";
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.fillStyle = "#9fd8ff";
+    ctx.font = "14px 'Segoe UI', sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText("音量", slider.x, slider.y - 16);
+    ctx.textAlign = "right";
+    ctx.fillText(Math.round(audioSettings.volume * 100) + "%", slider.x + slider.w, slider.y - 16);
+
+    ctx.beginPath();
+    ctx.arc(mute.x + mute.w / 2, mute.y + mute.h / 2, 20, 0, Math.PI * 2);
+    ctx.fillStyle = hovered === "mute" ? "rgba(77,208,255,0.28)" : "rgba(22,39,72,0.9)";
+    ctx.fill();
+    ctx.strokeStyle = hovered === "mute" ? "#9fd8ff" : "#46658e";
+    ctx.stroke();
+
+    const ix = mute.x + mute.w / 2, iy = mute.y + mute.h / 2;
+    ctx.fillStyle = audioSettings.muted ? "#7f91ad" : "#dff7ff";
+    ctx.beginPath();
+    ctx.moveTo(ix - 11, iy - 4);
+    ctx.lineTo(ix - 5, iy - 4);
+    ctx.lineTo(ix + 3, iy - 11);
+    ctx.lineTo(ix + 3, iy + 11);
+    ctx.lineTo(ix - 5, iy + 4);
+    ctx.lineTo(ix - 11, iy + 4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = ctx.fillStyle;
+    ctx.lineWidth = 2;
+    if (audioSettings.muted) {
+      ctx.beginPath();
+      ctx.moveTo(ix + 7, iy - 8);
+      ctx.lineTo(ix + 16, iy + 8);
+      ctx.moveTo(ix + 16, iy - 8);
+      ctx.lineTo(ix + 7, iy + 8);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.arc(ix + 2, iy, 10, -0.68, 0.68);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(ix + 2, iy, 15, -0.62, 0.62);
+      ctx.stroke();
+    }
+
+    ctx.lineCap = "round";
+    ctx.lineWidth = 7;
+    ctx.strokeStyle = "rgba(50,75,110,0.95)";
+    ctx.beginPath();
+    ctx.moveTo(slider.x, slider.y);
+    ctx.lineTo(slider.x + slider.w, slider.y);
+    ctx.stroke();
+    ctx.strokeStyle = audioSettings.muted ? "#6b7c98" : "#4dd0ff";
+    ctx.beginPath();
+    ctx.moveTo(slider.x, slider.y);
+    ctx.lineTo(slider.x + slider.w * audioSettings.volume, slider.y);
+    ctx.stroke();
+    ctx.lineCap = "butt";
+    ctx.fillStyle = audioSettings.muted ? "#a9b7ca" : "#eaffff";
+    ctx.beginPath();
+    ctx.arc(slider.x + slider.w * audioSettings.volume, slider.y, 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
   }
 
   draw() {
@@ -1098,13 +1423,13 @@ class Game {
       ctx.shadowColor = "#4dd0ff";
       ctx.shadowBlur = 16;
       ctx.strokeStyle = "rgba(150,235,255,0.85)";
-      ctx.lineWidth = 10;
+      ctx.lineWidth = 12;
       ctx.beginPath();
       ctx.moveTo(l.x, topY);
       ctx.lineTo(l.x, botY);
       ctx.stroke();
       ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 4;
+      ctx.lineWidth = 5;
       ctx.stroke();
       ctx.shadowBlur = 0;
     }
@@ -1175,9 +1500,10 @@ class Game {
       ctx.globalAlpha = 1;
     }
 
-    // ---- 卡片选择界面（增益 / 本回合道具） ----
-    const cardOpts = this.rewardOptions || this.itemOptions;
-    if ((this.waveState === "reward" || this.waveState === "item") && cardOpts) {
+    // ---- 卡片选择界面（增益 / 商店 / 本回合道具） ----
+    const cardOpts = this.rewardOptions || this.shopOptions || this.itemOptions;
+    if ((this.waveState === "reward" || this.waveState === "shop" || this.waveState === "item") && cardOpts) {
+      const isShop = this.waveState === "shop";
       this.rewardHover = this.cardAt(this.mouseX, this.mouseY);
       const animation = this.choiceAnimation;
       const progress = animation ? clamp(animation.elapsed / animation.duration, 0, 1) : 0;
@@ -1192,6 +1518,9 @@ class Game {
       ctx.fillStyle = "#9fd8ff";
       if (this.waveState === "reward") {
         ctx.fillText("第 " + this.wave + " 波通关！", W / 2, H / 2 - 205);
+      } else if (isShop) {
+        ctx.fillStyle = "#ffd43b";
+        ctx.fillText("金币 " + this.gold.toLocaleString("zh-CN") + "  ·  每次限购一件", W / 2, H / 2 - 205);
       } else {
         ctx.fillText("道具仅限本回合使用，下一波重新选择", W / 2, H / 2 - 205);
       }
@@ -1199,7 +1528,8 @@ class Game {
       ctx.fillStyle = "#ffd43b";
       ctx.shadowColor = "#ffd43b";
       ctx.shadowBlur = 12;
-      ctx.fillText(this.waveState === "reward" ? "选择增益" : "选择本回合道具", W / 2, H / 2 - 170);
+      const choiceTitle = this.waveState === "reward" ? "选择增益" : isShop ? "战备商店" : "选择本回合道具";
+      ctx.fillText(choiceTitle, W / 2, H / 2 - 170);
       ctx.shadowBlur = 0;
       ctx.restore();
 
@@ -1210,9 +1540,11 @@ class Game {
         const baseY = y0 + ch / 2;
 
         if (!animation) {
-          const hover = i === this.rewardHover;
+          const disabled = isShop && this.gold < opt.price;
+          const hover = i === this.rewardHover && !disabled;
           this.drawChoiceCard(opt, baseX, baseY - (hover ? 4 : 0), cw, ch, {
             hover,
+            disabled,
             scale: hover ? 1.035 : 1,
           });
           return;
@@ -1261,6 +1593,30 @@ class Game {
           back: flip < 0,
         });
       });
+
+      if (isShop && !animation) {
+        const exit = this.shopExitRect();
+        const exitHover = this.shopExitAt(this.mouseX, this.mouseY);
+        ctx.save();
+        roundedRectPath(exit.x, exit.y, exit.w, exit.h, 6);
+        ctx.fillStyle = exitHover ? "rgba(73,103,145,0.72)" : "rgba(22,39,72,0.78)";
+        ctx.fill();
+        ctx.strokeStyle = exitHover ? "#9fd8ff" : "#46658e";
+        ctx.lineWidth = exitHover ? 2 : 1;
+        ctx.stroke();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.font = "bold 15px 'Segoe UI', sans-serif";
+        ctx.fillStyle = exitHover ? "#ffffff" : "#b8cbe5";
+        ctx.fillText("跳过商店", exit.x + exit.w / 2, exit.y + exit.h / 2);
+        if (this.shopNoticeTimer > 0) {
+          ctx.globalAlpha = clamp(this.shopNoticeTimer / 0.3, 0, 1);
+          ctx.font = "bold 15px 'Segoe UI', sans-serif";
+          ctx.fillStyle = "#ff8d8d";
+          ctx.fillText(this.shopNotice, W / 2, exit.y + exit.h + 25);
+        }
+        ctx.restore();
+      }
     }
 
     // ---- 结算画面 ----
@@ -1276,7 +1632,7 @@ class Game {
       ctx.shadowBlur = 0;
       ctx.font = "22px 'Segoe UI', sans-serif";
       ctx.fillStyle = "#cfe3ff";
-      ctx.fillText("得分: " + this.score + "   到达波次: " + this.wave, W / 2, H / 2 - 10);
+      ctx.fillText("金币: " + this.gold.toLocaleString("zh-CN") + "   到达波次: " + this.wave, W / 2, H / 2 - 10);
       ctx.font = "18px 'Segoe UI', sans-serif";
       ctx.fillStyle = "#7ef0ff";
       ctx.fillText("按 R 键重新开始", W / 2, H / 2 + 40);
@@ -1296,6 +1652,7 @@ class Game {
       ctx.font = "18px 'Segoe UI', sans-serif";
       ctx.fillStyle = "#9fd8ff";
       ctx.fillText("按 Esc 继续", W / 2, H / 2 + 28);
+      this.drawPauseAudioControls();
     }
 
     ctx.restore();
@@ -1318,11 +1675,11 @@ class Game {
     ctx.textAlign = "left";
     ctx.fillText("HP " + Math.ceil(this.player.hp) + " / " + this.player.maxHp, bx + 6, by + 13);
 
-    // 得分 & 波次（右上）
+    // 金币 & 波次（右上）
     ctx.textAlign = "right";
     ctx.font = "bold 20px 'Segoe UI', sans-serif";
     ctx.fillStyle = "#ffd43b";
-    ctx.fillText("得分 " + this.score, W - 16, 32);
+    ctx.fillText("金币 " + this.gold.toLocaleString("zh-CN"), W - 16, 32);
     ctx.font = "15px 'Segoe UI', sans-serif";
     ctx.fillStyle = "#9fd8ff";
     ctx.fillText("波次 " + this.wave + (this.waveState === "fighting" ? "  ·  击杀 " + this.waveKills + "/" + this.waveQuota : ""), W - 16, 54);
@@ -1331,7 +1688,7 @@ class Game {
     ctx.textAlign = "left";
     ctx.font = "bold 17px 'Segoe UI', sans-serif";
     ctx.fillStyle = this.player.laserCharges > 0 ? "#7ef0ff" : "#557799";
-    ctx.fillText("◉ 激光 ×" + this.player.laserCharges, 16, H - 18);
+    ctx.fillText("◉ 激光 " + this.player.laserCharges + " / " + this.player.maxLaserCharges, 16, H - 18);
 
     // 本回合道具（左下角）
     if (this.item) {
@@ -1341,10 +1698,10 @@ class Game {
         ctx.fillText("◈ 护盾 " + this.player.shield, 16, H - 42);
       } else if (this.item.id === "bomb") {
         ctx.fillStyle = this.item.count > 0 ? "#ff9f43" : "#557799";
-        ctx.fillText("● 炸弹 ×" + this.item.count + "（按 X 投掷）", 16, H - 42);
+        ctx.fillText("● 炸弹 " + this.item.count + " / " + this.player.bombCapacity + "（按 X 投掷）", 16, H - 42);
       } else if (this.item.id === "track") {
         ctx.fillStyle = "#ffe066";
-        ctx.fillText("◎ 自动追踪", 16, H - 42);
+        ctx.fillText("◎ 自动追踪 " + this.player.trackShotsPerSecond + " 发/秒", 16, H - 42);
       }
     }
   }
@@ -1352,6 +1709,22 @@ class Game {
 
 // ---------- 输入 ----------
 const input = { left: false, right: false, up: false, down: false };
+let volumeSliderDragging = false;
+
+function canvasPoint(e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * (W / rect.width),
+    y: (e.clientY - rect.top) * (H / rect.height),
+  };
+}
+
+function updateVolumeFromPointer(e) {
+  if (!game || !game.paused) return;
+  const point = canvasPoint(e);
+  const { slider } = game.pauseAudioLayout();
+  setAudioVolume((point.x - slider.x) / slider.w, true);
+}
 
 // 选择当前卡片（增益或道具，1/2/3 键与鼠标点击共用）
 function chooseCard(i) {
@@ -1386,7 +1759,20 @@ window.addEventListener("keydown", (e) => {
       break;
   }
 });
-canvas.addEventListener("pointerdown", ensureAudio);
+canvas.addEventListener("pointerdown", (e) => {
+  ensureAudio();
+  if (!game || !game.paused) return;
+  const point = canvasPoint(e);
+  if (game.pauseAudioControlAt(point.x, point.y) === "slider") {
+    volumeSliderDragging = true;
+    canvas.setPointerCapture?.(e.pointerId);
+    updateVolumeFromPointer(e);
+  }
+});
+canvas.addEventListener("pointermove", (e) => {
+  if (volumeSliderDragging) updateVolumeFromPointer(e);
+});
+window.addEventListener("pointerup", () => { volumeSliderDragging = false; });
 window.addEventListener("keyup", (e) => {
   switch (e.code) {
     case "ArrowLeft": case "KeyA": input.left = false; break;
@@ -1402,15 +1788,25 @@ canvas.addEventListener("mousemove", (e) => {
   const rect = canvas.getBoundingClientRect();
   game.mouseX = (e.clientX - rect.left) * (W / rect.width);
   game.mouseY = (e.clientY - rect.top) * (H / rect.height);
-  canvas.style.cursor = game.cardAt(game.mouseX, game.mouseY) >= 0 ? "pointer" : "default";
+  const interactive = game.cardAt(game.mouseX, game.mouseY) >= 0 || game.shopExitAt(game.mouseX, game.mouseY) || !!game.pauseAudioControlAt(game.mouseX, game.mouseY);
+  canvas.style.cursor = interactive ? "pointer" : "default";
 });
 canvas.addEventListener("click", (e) => {
   if (!game) return;
-  const rect = canvas.getBoundingClientRect();
-  const mx = (e.clientX - rect.left) * (W / rect.width);
-  const my = (e.clientY - rect.top) * (H / rect.height);
+  const { x: mx, y: my } = canvasPoint(e);
+  const pauseControl = game.pauseAudioControlAt(mx, my);
+  if (pauseControl === "mute") {
+    toggleAudioMute();
+    return;
+  }
+  if (pauseControl === "slider") {
+    const { slider } = game.pauseAudioLayout();
+    setAudioVolume((mx - slider.x) / slider.w, true);
+    return;
+  }
   const i = game.cardAt(mx, my);
   if (i >= 0) chooseCard(i);
+  else if (game.shopExitAt(mx, my)) game.leaveShop();
 });
 
 // ---------- 主循环 ----------
