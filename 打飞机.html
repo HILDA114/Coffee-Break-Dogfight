@@ -1,0 +1,1394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>星际猎手 - 2D 射击游戏</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0a0e1a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    color: #cfe3ff;
+    overflow: hidden;
+  }
+  #wrap { position: relative; }
+  canvas {
+    display: block;
+    background: #060a14;
+    border: 2px solid #1e3a5f;
+    border-radius: 8px;
+    box-shadow: 0 0 40px rgba(30, 90, 200, 0.25);
+  }
+  #hint {
+    margin-top: 10px;
+    text-align: center;
+    font-size: 13px;
+    color: #7f9bc4;
+    line-height: 1.7;
+  }
+  kbd {
+    background: #16233c;
+    border: 1px solid #2c4a77;
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 12px;
+    color: #a8d0ff;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="800" height="600"></canvas>
+  <div id="hint">
+    <kbd>←</kbd><kbd>→</kbd> / <kbd>A</kbd><kbd>D</kbd> 移动 &nbsp;·&nbsp;
+    <kbd>↑</kbd><kbd>↓</kbd> / <kbd>W</kbd><kbd>S</kbd> 上下移动 &nbsp;·&nbsp;
+    飞船全自动射击 &nbsp;·&nbsp; <kbd>空格</kbd> 发射激光 &nbsp;·&nbsp; <kbd>X</kbd> 投掷炸弹 &nbsp;·&nbsp; <kbd>Esc</kbd> 暂停 &nbsp;·&nbsp; <kbd>R</kbd> 重新开始
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+ * 星际猎手 —— 一个简单的 2D 纵版射击游戏
+ * - 玩家飞船：方向键 / WASD 移动，全自动射击
+ * - 敌人：多种类型，各有血量（头顶显示血条），打光血量即消灭
+ * - 波次系统：每波敌人更多、更快、更肉
+ * ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width;
+const H = canvas.height;
+
+// ---------- 游戏状态 ----------
+let game = null;
+
+// ---------- 工具函数 ----------
+function rand(a, b) { return a + Math.random() * (b - a); }
+function randInt(a, b) { return Math.floor(rand(a, b + 1)); }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function easeInCubic(t) { return t * t * t; }
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+function easeInOutCubic(t) {
+  return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+}
+function roundedRectPath(x, y, w, h, r) {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+  ctx.lineTo(x + w, y + h - radius);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  ctx.lineTo(x + radius, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+// 点到线段的最短距离（用于激光命中判定）
+function distToSegment(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+  t = clamp(t, 0, 1);
+  const cx = ax + dx * t, cy = ay + dy * t;
+  return Math.hypot(px - cx, py - cy);
+}
+
+// ---------- 粒子系统（爆炸 / 火花） ----------
+class Particle {
+  constructor(x, y, vx, vy, life, size, color) {
+    this.x = x; this.y = y;
+    this.vx = vx; this.vy = vy;
+    this.life = life; this.maxLife = life;
+    this.size = size; this.color = color;
+  }
+  update(dt) {
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+    this.vx *= 0.98;
+    this.vy *= 0.98;
+    this.life -= dt;
+  }
+  draw() {
+    const a = clamp(this.life / this.maxLife, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = this.color;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size * a + 0.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ---------- 漂浮文字（伤害数字等） ----------
+class FloatText {
+  constructor(x, y, text, color, size = 14) {
+    this.x = x; this.y = y;
+    this.text = text; this.color = color; this.size = size;
+    this.life = 0.8; this.maxLife = 0.8;
+  }
+  update(dt) { this.y -= 40 * dt; this.life -= dt; }
+  draw() {
+    const a = clamp(this.life / this.maxLife, 0, 1);
+    ctx.globalAlpha = a;
+    ctx.font = `bold ${this.size}px "Segoe UI", sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillStyle = this.color;
+    ctx.fillText(this.text, this.x, this.y);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ---------- 子弹 ----------
+class Bullet {
+  constructor(x, y, vx, vy, damage, color = "#7ef0ff", r = 3) {
+    this.x = x; this.y = y;
+    this.vx = vx; this.vy = vy;
+    this.damage = damage;
+    this.color = color;
+    this.r = r;
+    this._dead = false;
+  }
+  update(dt) { this.x += this.vx * dt; this.y += this.vy * dt; }
+  draw() {
+    ctx.fillStyle = this.color;
+    ctx.shadowColor = this.color;
+    ctx.shadowBlur = 8;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+  get dead() { return this._dead || this.y < -20 || this.y > H + 20 || this.x < -20 || this.x > W + 20; }
+  set dead(v) { this._dead = v; }
+}
+
+// ---------- 敌人 ----------
+const ENEMY_TYPES = {
+  scout: { name: "侦察机", hp: 1,  r: 14, speed: 280, score: 10,  color: "#ff6b6b",  fireRate: 0, burstChance: 0 },
+  grunt: { name: "步兵机", hp: 3,  r: 18, speed: 75,  score: 20,  color: "#ffa94d",  fireRate: 2.0, burstChance: 0 },
+  tank:  { name: "装甲机", hp: 9,  r: 26, speed: 38,  score: 50,  color: "#c0a0ff",  fireRate: 2.0, burstChance: 0.35, burst: { min: 3, max: 6 } },
+  elite: { name: "精英机", hp: 40, r: 32, speed: 55,  score: 120, color: "#ff5ec8",  fireRate: 2.4, burstChance: 0 },
+};
+
+class Enemy {
+  constructor(type, x, y) {
+    const t = ENEMY_TYPES[type];
+    this.type = type;
+    this.name = t.name;
+    this.maxHp = t.hp;
+    this.hp = t.hp;
+    this.r = t.r;
+    this.speed = t.speed;
+    this.score = t.score;
+    this.color = t.color;
+    this.x = x; this.y = y;
+    // 进入屏幕时先向下移动，到位后左右摇摆
+    this.phase = "enter";
+    this.enterY = rand(70, H * 0.45);
+    this.wobble = rand(0, Math.PI * 2);
+    this.wobbleSpeed = rand(1.2, 2.4);
+    this.wobbleAmp = rand(20, 60);
+    this.fireTimer = rand(0.8, 2);
+    this.flash = 0; // 受击闪白
+    this.burst = 0;      // 连射剩余颗数
+    this.burstTimer = 0; // 连射间隔计时
+    this.charge = 0;     // 激光蓄力剩余时间（前摇）
+    this.laser = 0;      // 激光持续剩余时间
+    this.laserDir = { x: 0, y: 1 };
+    this.lockX = 0; this.lockY = 0; // 蓄力时锁定的目标位置
+    this.gone = false;   // 侦察机飞出屏幕标记
+    this.facing = Math.PI / 2; // 机头朝向（默认朝下，每帧转向玩家）
+  }
+
+  // 机头位置（用于开火 / 激光 / 绘制）
+  nose() {
+    return { x: this.x + Math.cos(this.facing) * this.r, y: this.y + Math.sin(this.facing) * this.r };
+  }
+
+  update(dt, game) {
+    if (this.type === "scout") {
+      // 侦察机：只会直线俯冲，不左右移动，飞出屏幕即消失
+      this.y += this.speed * dt;
+      if (this.y > H + 40) this.gone = true;
+    } else if (this.phase === "enter") {
+      this.y += this.speed * dt;
+      if (this.y >= this.enterY) { this.y = this.enterY; this.phase = "battle"; }
+    } else {
+      this.x += Math.cos(this.wobble) * this.wobbleAmp * dt * 1.6;
+      this.wobble += this.wobbleSpeed * dt;
+      // 装甲机/精英机：停留在屏幕上方持续射击；其余缓慢向玩家逼近
+      if (game.player && this.type !== "tank" && this.type !== "elite") {
+        this.y += this.speed * 0.35 * dt;
+      }
+      if (this.y > H + 40) this.y = -40; // 循环
+    }
+    // 边界反弹（摇摆时不出界）
+    if (this.x < this.r + 10) { this.x = this.r + 10; this.wobble = Math.PI - this.wobble; }
+    if (this.x > W - this.r - 10) { this.x = W - this.r - 10; this.wobble = Math.PI - this.wobble; }
+    this.flash = Math.max(0, this.flash - dt * 6);
+
+    // 机头朝向（侦察机固定朝下，其余朝向玩家）
+    if (game.player) {
+      const target = this.type === "scout" ? Math.PI / 2 : Math.atan2(game.player.y - this.y, game.player.x - this.x);
+      let diff = target - this.facing;
+      while (diff > Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      this.facing += diff * Math.min(1, dt * 6);
+    }
+
+    // ---- 攻击逻辑 ----
+    const fr = ENEMY_TYPES[this.type].fireRate;
+    const burstChance = ENEMY_TYPES[this.type].burstChance || 0;
+    const burstCfg = ENEMY_TYPES[this.type].burst;
+    const canFire = game.player && this.y > 0; // 一入场（进入屏幕）即可准备攻击
+    if (fr > 0 && canFire) {
+      if (this.type === "elite") {
+        // 精英机：激光攻击（1 秒前摇 -> 发射 -> 冷却）
+        if (this.charge > 0) {
+          this.charge -= dt;
+          if (this.charge <= 0) {
+            // 蓄力完成，发射激光
+            this.laser = 0.35;
+            const n = this.nose();
+            const dx = this.lockX - n.x, dy = this.lockY - n.y;
+            const len = Math.hypot(dx, dy) || 1;
+            this.laserDir = { x: dx / len, y: dy / len };
+            this.fireTimer = rand(2.2, 3.2); // 冷却后再蓄力
+          }
+        } else if (this.laser > 0) {
+          this.laser -= dt;
+          // 激光命中检测（配合玩家无敌帧，一次激光最多打一下）
+          const n = this.nose();
+          const ox = n.x, oy = n.y;
+          const ex2 = ox + this.laserDir.x * 1000, ey2 = oy + this.laserDir.y * 1000;
+          if (distToSegment(game.player.x, game.player.y, ox, oy, ex2, ey2) < 8 + game.player.r) {
+            game.player.hit(25);
+          }
+        } else {
+          this.fireTimer -= dt;
+          if (this.fireTimer <= 0) {
+            this.charge = 1.0;          // 开始蓄力（前摇）
+            this.lockX = game.player.x; // 锁定玩家当前位置
+            this.lockY = game.player.y;
+          }
+        }
+      } else {
+        // 普通单发 / 概率连射（连射颗数按类型配置）
+        this.fireTimer -= dt;
+        if (this.burst > 0) {
+          // 连射中：按间隔连续发射
+          this.burstTimer -= dt;
+          if (this.burstTimer <= 0) {
+            this.burstTimer = 0.09;
+            this.burst--;
+            game.enemyBullets.push(game.spawnEnemyBullet(this.nose().x, this.nose().y, game.player));
+          }
+        } else if (this.fireTimer <= 0) {
+          this.fireTimer = fr;
+          if (burstCfg && Math.random() < burstChance) {
+            this.burst = randInt(burstCfg.min, burstCfg.max); // 连射（步兵机固定 3 颗）
+            this.burstTimer = 0;                              // 立即打出第一颗
+          } else {
+            game.enemyBullets.push(game.spawnEnemyBullet(this.nose().x, this.nose().y, game.player));
+          }
+        }
+      }
+    }
+  }
+
+  draw() {
+    const t = ENEMY_TYPES[this.type];
+    // 主体（精英机蓄力时变橙提示）
+    let bodyColor = t.color;
+    if (this.type === "elite" && this.charge > 0) bodyColor = "#ff7043";
+    // 机体：旋转使机头朝向玩家（血条/激光特效保持水平绘制）
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.facing + Math.PI / 2);
+    ctx.fillStyle = this.flash > 0 ? "#ffffff" : bodyColor;
+    ctx.shadowColor = t.color;
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    ctx.moveTo(0, -this.r);
+    ctx.lineTo(this.r * 0.9, this.r * 0.6);
+    ctx.lineTo(this.r * 0.4, this.r * 0.9);
+    ctx.lineTo(-this.r * 0.4, this.r * 0.9);
+    ctx.lineTo(-this.r * 0.9, this.r * 0.6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    // 座舱
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.beginPath();
+    ctx.arc(0, -this.r * 0.15, this.r * 0.35, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    // 精英机激光特效（前摇预警虚线 + 激光本体）
+    if (this.type === "elite") {
+      const n = this.nose();
+      const ox = n.x, oy = n.y;
+      if (this.charge > 0) {
+        // 1 秒前摇：闪烁的红色预警线，指向锁定位置
+        const dx = this.lockX - ox, dy = this.lockY - oy;
+        const len = Math.hypot(dx, dy) || 1;
+        const ex2 = ox + (dx / len) * 1000, ey2 = oy + (dy / len) * 1000;
+        const alpha = 0.25 + 0.45 * Math.abs(Math.sin(this.charge * 14));
+        ctx.strokeStyle = `rgba(255, 90, 60, ${alpha.toFixed(3)})`;
+        ctx.lineWidth = 3;
+        ctx.setLineDash([10, 8]);
+        ctx.beginPath();
+        ctx.moveTo(ox, oy);
+        ctx.lineTo(ex2, ey2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      if (this.laser > 0) {
+        // 激光本体：亮红粗线 + 白芯
+        const ex2 = ox + this.laserDir.x * 1000, ey2 = oy + this.laserDir.y * 1000;
+        ctx.shadowColor = "#ff3b30";
+        ctx.shadowBlur = 20;
+        ctx.strokeStyle = "#ff5a3c";
+        ctx.lineWidth = 8;
+        ctx.beginPath();
+        ctx.moveTo(ox, oy);
+        ctx.lineTo(ex2, ey2);
+        ctx.stroke();
+        ctx.strokeStyle = "#fff6e0";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+    }
+    // 血条背景
+    const bw = this.r * 2.4;
+    const bh = 5;
+    const bx = this.x - bw / 2;
+    const by = this.y - this.r - 12;
+    ctx.fillStyle = "rgba(0,0,0,0.6)";
+    ctx.fillRect(bx, by, bw, bh);
+    // 血条（固定红色，长度按剩余血量比例）
+    const ratio = clamp(this.hp / this.maxHp, 0, 1);
+    ctx.fillStyle = "#ff6b6b";
+    ctx.fillRect(bx, by, bw * ratio, bh);
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
+  }
+
+  hit(damage) {
+    this.hp -= damage;
+    this.flash = 1;
+    return this.hp <= 0;
+  }
+}
+
+// ---------- 玩家 ----------
+class Player {
+  constructor() {
+    this.x = W / 2;
+    this.y = H - 80;
+    this.r = 10;
+    this.speed = 300;
+    this.maxHp = 100;
+    this.hp = 100;
+    this.invuln = 0;        // 受伤后无敌时间
+    this.fireTimer = 0;
+    this.fireInterval = 0.14;
+    this.bulletDamage = 1;
+    this.laserCharges = 0; // 激光次数（无前摇，可累积）
+    this.shield = 0;       // 护盾值（本回合道具，优先抵挡伤害）
+  }
+
+  update(dt, input, game) {
+    // 移动
+    let dx = 0, dy = 0;
+    if (input.left) dx -= 1;
+    if (input.right) dx += 1;
+    if (input.up) dy -= 1;
+    if (input.down) dy += 1;
+    if (dx !== 0 && dy !== 0) { dx *= 0.7071; dy *= 0.7071; }
+    this.x = clamp(this.x + dx * this.speed * dt, this.r + 8, W - this.r - 8);
+    this.y = clamp(this.y + dy * this.speed * dt, this.r + 8, H - this.r - 8);
+    this.invuln = Math.max(0, this.invuln - dt);
+
+    // 全自动射击
+    this.fireTimer -= dt;
+    if (this.fireTimer <= 0) {
+      this.fireTimer = this.fireInterval;
+      game.bullets.push(new Bullet(this.x, this.y - this.r - 4, 0, -720, this.bulletDamage, "#7ef0ff"));
+      game.muzzle = 0.08; // 枪口闪光
+    }
+  }
+
+  hit(damage) {
+    if (this.invuln > 0) return;
+    let d = damage;
+    if (this.shield > 0) {
+      const absorbed = Math.min(this.shield, d);
+      this.shield -= absorbed;
+      d -= absorbed;
+    }
+    if (d > 0) {
+      this.hp -= d;
+      this.invuln = 1.2;
+    } else {
+      this.invuln = 0.3; // 护盾完全抵挡时短暂无敌，防止被同帧连击
+    }
+  }
+
+  draw() {
+    // 无敌闪烁
+    if (this.invuln > 0 && Math.floor(this.invuln * 12) % 2 === 0) return;
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    // 护盾：蓝色发光圈
+    if (this.shield > 0) {
+      const pulse = 1 + 0.06 * Math.sin(game.time * 6);
+      const sr = (this.r + 9) * pulse;
+      ctx.beginPath();
+      ctx.arc(0, 0, sr, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(80,190,255,0.12)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(110,210,255,0.95)";
+      ctx.lineWidth = 3;
+      ctx.shadowColor = "#4dd0ff";
+      ctx.shadowBlur = 16;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      // 内圈细线
+      ctx.beginPath();
+      ctx.arc(0, 0, sr * 0.82, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(110,210,255,0.4)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+    ctx.fillStyle = "#4dd0ff";
+    ctx.shadowColor = "#4dd0ff";
+    ctx.shadowBlur = 16;
+    // 飞船主体（三角形）
+    ctx.beginPath();
+    ctx.moveTo(0, -this.r - 6);
+    ctx.lineTo(this.r, this.r);
+    ctx.lineTo(0, this.r * 0.5);
+    ctx.lineTo(-this.r, this.r);
+    ctx.closePath();
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    // 引擎火焰
+    ctx.fillStyle = game.muzzle > 0 ? "#fff" : "#ffd43b";
+    ctx.beginPath();
+    ctx.moveTo(-6, this.r * 0.5);
+    ctx.lineTo(6, this.r * 0.5);
+    ctx.lineTo(0, this.r * 0.5 + 10 + Math.random() * 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// 场上同时存在的敌人上限（防止无限刷怪堆叠）
+const MAX_ALIVE_ENEMIES = 10;
+
+// ---------- 主游戏对象 ----------
+class Game {
+  constructor() {
+    this.reset();
+  }
+
+  reset() {
+    this.player = new Player();
+    this.bullets = [];
+    this.enemyBullets = [];
+    this.enemies = [];
+    this.playerLasers = []; // 玩家发射的激光
+    this.particles = [];
+    this.shockwaves = [];  // 爆炸冲击波圆环
+    this.floatTexts = [];
+    this.score = 0;
+    this.wave = 0;
+    this.waveState = "intermission"; // intermission | fighting | reward | gameover
+    this.paused = false;
+    this.intermissionTimer = 1.6;
+    this.waveKills = 0; // 本波已击杀数
+    this.waveQuota = 0; // 本波所需击杀数（刷够即停止刷怪）
+    this.spawnTimer = 0;
+    this.rewardOptions = null; // 增益选择卡片
+    this.rewardHover = -1;
+    this.choiceAnimation = null;
+    this.mouseX = -1; this.mouseY = -1;
+    this.item = null;          // 本回合道具（护盾/炸弹/自动追踪）
+    this.itemOptions = null;   // 道具选择卡片
+    this.bomb = null;          // 飞行中的炸弹
+    this.homingBullets = [];   // 自动追踪子弹
+    this.trackTimer = 0;
+    this.time = 0;
+    this.muzzle = 0;
+    this.screenShake = 0;
+    this.stars = [];
+    for (let i = 0; i < 90; i++) {
+      this.stars.push({ x: rand(0, W), y: rand(0, H), s: rand(0.5, 2.2), v: rand(20, 90) });
+    }
+  }
+
+  // 本波所需击杀数（配额）
+  waveQuotaFor(n) { return 7 + n * 3; }
+
+  // 随机生成一只敌人（波次越高越强、越容易出现高级敌人）
+  randomEnemyItem() {
+    const n = this.wave;
+    const roll = Math.random();
+    let type;
+    if (n < 4) {
+      // 前 3 波以最简单的侦察机为主
+      if (n >= 3 && roll < 0.1) type = "tank";      // 第 3 波起少量装甲机
+      else if (roll < 0.3) type = "grunt";
+      else type = "scout";
+    } else {
+      if (n >= 5 && roll < 0.12) type = "elite";
+      else if (roll < 0.38) type = "tank";
+      else if (roll < 0.7) type = "grunt";
+      else type = "scout";
+    }
+    // 波次越高，敌人血量越多
+    return { type, hpMul: 1 + n * 0.15 };
+  }
+
+  spawnEnemy(item) {
+    const type = ENEMY_TYPES[item.type];
+    const e = new Enemy(item.type, rand(40, W - 40), -type.r - 10);
+    // 精英机血量固定 40，不随波次放大；其余敌人随波次增强
+    const mul = item.type === "elite" ? 1 : item.hpMul;
+    e.maxHp = Math.round(e.maxHp * mul);
+    e.hp = e.maxHp;
+    return e;
+  }
+
+  spawnEnemyBullet(x, y, player) {
+    // 朝玩家方向射击（敌人子弹稍慢、更大）
+    const dx = player.x - x;
+    const dy = player.y - y;
+    const len = Math.hypot(dx, dy) || 1;
+    const speed = 140;
+    return new Bullet(x, y, (dx / len) * speed, (dy / len) * speed, 5, "#ff5e7a", 5);
+  }
+
+  addParticles(x, y, color, count, power = 1) {
+    for (let i = 0; i < count; i++) {
+      const ang = rand(0, Math.PI * 2);
+      const sp = rand(40, 260) * power;
+      this.particles.push(new Particle(x, y, Math.cos(ang) * sp, Math.sin(ang) * sp, rand(0.3, 0.9), rand(1.5, 4), color));
+    }
+  }
+
+  update(dt, input) {
+    if (this.paused) return;
+    this.time += dt;
+    this.muzzle = Math.max(0, this.muzzle - dt);
+    this.screenShake = Math.max(0, this.screenShake - dt);
+
+    // 星星滚动
+    for (const s of this.stars) {
+      s.y += s.v * dt;
+      if (s.y > H) { s.y = -2; s.x = rand(0, W); }
+    }
+
+    // 选择动画结束后才应用效果，避免界面状态提前切走。
+    if (this.choiceAnimation) {
+      this.choiceAnimation.elapsed += dt;
+      if (this.choiceAnimation.elapsed >= this.choiceAnimation.duration) {
+        const selection = this.choiceAnimation;
+        this.choiceAnimation = null;
+        if (selection.kind === "reward" && this.waveState === "reward") this.applyReward(selection.id);
+        else if (selection.kind === "item" && this.waveState === "item") this.applyItem(selection.id);
+      }
+      return;
+    }
+
+    if (this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "item") return;
+
+    this.player.update(dt, input, this);
+
+    // ---- 波次流程：持续刷怪，直到玩家刷够本波配额 ----
+    if (this.waveState === "intermission") {
+      this.intermissionTimer -= dt;
+      if (this.intermissionTimer <= 0) {
+        this.wave++;
+        this.waveKills = 0;
+        this.waveQuota = this.waveQuotaFor(this.wave);
+        this.spawnTimer = 0.3;
+        this.waveState = "fighting";
+      }
+    } else if (this.waveState === "fighting") {
+      // 击杀数未达标且场上敌人未满时，持续刷怪
+      this.spawnTimer -= dt;
+      if (this.spawnTimer <= 0 && this.enemies.length < MAX_ALIVE_ENEMIES) {
+        this.enemies.push(this.spawnEnemy(this.randomEnemyItem()));
+        this.spawnTimer = rand(0.3, 0.55);
+      }
+    }
+
+    // ---- 子弹 ----
+    for (const b of this.bullets) { b.px = b.x; b.py = b.y; b.update(dt); }
+    for (const b of this.enemyBullets) { b.px = b.x; b.py = b.y; b.update(dt); }
+    this.bullets = this.bullets.filter(b => !b.dead);
+    this.enemyBullets = this.enemyBullets.filter(b => !b.dead);
+
+    // ---- 碰撞：玩家子弹 vs 敌人（扫掠式检测，防止高速子弹穿透） ----
+    for (const b of this.bullets) {
+      for (const e of this.enemies) {
+        // 本帧子弹走过的线段 (px,py)->(x,y) 与敌人圆是否相交
+        const dx = b.x - b.px, dy = b.y - b.py;
+        const ex = e.x - b.px, ey = e.y - b.py;
+        const len2 = dx * dx + dy * dy;
+        let t = len2 > 0 ? (ex * dx + ey * dy) / len2 : 0;
+        t = clamp(t, 0, 1);
+        const cx = b.px + dx * t, cy = b.py + dy * t;
+        const ddx = e.x - cx, ddy = e.y - cy;
+        const rr = e.r + b.r;
+        if (ddx * ddx + ddy * ddy < rr * rr) {
+          b.dead = true;
+          const killed = e.hit(b.damage);
+          this.addParticles(b.x, b.y, b.color, 4, 0.6);
+          this.floatTexts.push(new FloatText(e.x + rand(-8, 8), e.y - e.r - 18, "-" + b.damage, "#ffd43b", 12));
+          if (killed) this.killEnemy(e);
+          break;
+        }
+      }
+    }
+    this.bullets = this.bullets.filter(b => !b.dead);
+
+    // ---- 碰撞：敌人子弹 vs 玩家 ----
+    for (const b of this.enemyBullets) {
+      const dx = b.x - this.player.x, dy = b.y - this.player.y;
+      if (dx * dx + dy * dy < (this.player.r + b.r) * (this.player.r + b.r)) {
+        b.dead = true;
+        this.player.hit(b.damage);
+        this.addParticles(b.x, b.y, "#ff5e7a", 6, 0.7);
+        if (this.player.hp <= 0) { this.gameOver(); break; }
+      }
+    }
+    this.enemyBullets = this.enemyBullets.filter(b => !b.dead);
+
+    // ---- 碰撞：敌人撞到玩家 ----
+    if (this.waveState !== "gameover") {
+      for (const e of this.enemies) {
+        const dx = e.x - this.player.x, dy = e.y - this.player.y;
+        if (dx * dx + dy * dy < (e.r + this.player.r) * (e.r + this.player.r)) {
+          this.player.hit(20);
+          this.killEnemy(e); // 撞击后敌人也爆掉
+          this.screenShake = 0.3;
+          if (this.player.hp <= 0) { this.gameOver(); break; }
+        }
+      }
+    }
+
+    // ---- 玩家激光（穿透光束，持续 0.35 秒） ----
+    for (const l of this.playerLasers) l.t -= dt;
+    this.playerLasers = this.playerLasers.filter(l => l.t > 0);
+    for (const l of this.playerLasers) {
+      for (const e of [...this.enemies]) {
+        if (l.hit.has(e)) continue;
+        if (Math.abs(e.x - l.x) < 14 + e.r) {
+          l.hit.add(e);
+          const killed = e.hit(l.damage);
+          this.addParticles(e.x, e.y, "#7ef0ff", 6, 0.8);
+          this.floatTexts.push(new FloatText(e.x, e.y - e.r - 18, "-" + l.damage, "#ffd43b", 12));
+          if (killed) this.killEnemy(e);
+        }
+      }
+    }
+
+    // ---- 自动追踪道具：2 发/秒 自动攻击最近敌人 ----
+    if (this.item && this.item.id === "track" && this.enemies.length > 0) {
+      this.trackTimer -= dt;
+      if (this.trackTimer <= 0) {
+        this.trackTimer = 0.5;
+        this.homingBullets.push({ x: this.player.x, y: this.player.y - this.player.r - 6, speed: 380, damage: 1, dead: false });
+      }
+    }
+    for (const hb of this.homingBullets) {
+      let target = null, td = 1e9;
+      for (const e of this.enemies) {
+        const d = (e.x - hb.x) ** 2 + (e.y - hb.y) ** 2;
+        if (d < td) { td = d; target = e; }
+      }
+      if (target) {
+        const dx = target.x - hb.x, dy = target.y - hb.y;
+        const len = Math.hypot(dx, dy) || 1;
+        hb.x += (dx / len) * hb.speed * dt;
+        hb.y += (dy / len) * hb.speed * dt;
+        if (len < target.r + 5) {
+          hb.dead = true;
+          const killed = target.hit(hb.damage);
+          this.addParticles(hb.x, hb.y, "#ffe066", 5, 0.6);
+          if (killed) this.killEnemy(target);
+        }
+      } else {
+        hb.y -= hb.speed * dt; // 无目标时直线飞出
+        if (hb.y < -20) hb.dead = true;
+      }
+    }
+    this.homingBullets = this.homingBullets.filter(hb => !hb.dead);
+
+    // ---- 炸弹道具：直线飞行，接触敌人或抵达顶部时爆炸（35 范围伤害） ----
+    if (this.bomb) {
+      const previousY = this.bomb.y;
+      this.bomb.y += this.bomb.vy * dt;
+      let collided = false;
+      for (const e of this.enemies) {
+        if (distToSegment(e.x, e.y, this.bomb.x, previousY, this.bomb.x, this.bomb.y) <= this.bomb.r + e.r) {
+          collided = true;
+          break;
+        }
+      }
+      const reachedTop = this.bomb.y <= this.bomb.r;
+      if (collided || reachedTop) {
+        const bx = this.bomb.x, by = Math.max(this.bomb.y, this.bomb.r);
+        this.bomb = null;
+        this.explosion(bx, by, "#ffd43b", 1.4);
+        this.floatTexts.push(new FloatText(bx, by - 26, "轰!", "#ffd43b", 24));
+        const R = 95;
+        for (const e of [...this.enemies]) {
+          if (Math.hypot(e.x - bx, e.y - by) < R + e.r) {
+            const killed = e.hit(35);
+            this.floatTexts.push(new FloatText(e.x, e.y - e.r - 18, "-35", "#ffd43b", 13));
+            if (killed) this.killEnemy(e);
+          }
+        }
+      }
+    }
+
+    // ---- 敌人更新 ----
+    for (const e of this.enemies) e.update(dt, this);
+    this.enemies = this.enemies.filter(e => !e.gone); // 侦察机飞出屏幕后移除
+
+    // ---- 粒子 & 文字 ----
+    for (const p of this.particles) p.update(dt);
+    for (const t of this.floatTexts) t.update(dt);
+    for (const s of this.shockwaves) { s.life -= dt; s.r += s.speed * dt; }
+    this.particles = this.particles.filter(p => p.life > 0);
+    this.floatTexts = this.floatTexts.filter(t => t.life > 0);
+    this.shockwaves = this.shockwaves.filter(s => s.life > 0);
+  }
+
+  killEnemy(e, countForWave = true) {
+    const idx = this.enemies.indexOf(e);
+    if (idx === -1) return;
+    this.enemies.splice(idx, 1);
+    this.score += e.score;
+    if (countForWave) this.waveKills++;
+    this.addParticles(e.x, e.y, ENEMY_TYPES[e.type].color, 22, 1.4);
+    this.addParticles(e.x, e.y, "#ffffff", 8, 1);
+    this.shockwaves.push({ x: e.x, y: e.y, r: 5, speed: 240, life: 0.3, maxLife: 0.3, color: ENEMY_TYPES[e.type].color, width: 3 });
+    this.screenShake = 0.18;
+    this.floatTexts.push(new FloatText(e.x, e.y, "+" + e.score, "#7ef0ff", 13));
+    // 刷够本波配额：停止刷怪，场上剩余敌人全部爆炸清场
+    if (this.waveState === "fighting" && this.waveKills >= this.waveQuota) {
+      this.clearWave();
+    }
+  }
+
+  // 本波完成：场上剩余敌机全部爆炸销毁，清掉敌弹，进入下一波
+  clearWave() {
+    this.waveState = "intermission";
+    this.intermissionTimer = 2;
+    for (const e of [...this.enemies]) this.killEnemy(e, false);
+    this.enemyBullets = [];
+    this.floatTexts.push(new FloatText(W / 2, H / 2, "第 " + this.wave + " 波清场!", "#ffd43b", 26));
+    // 每波结束重置玩家生命值
+    this.player.hp = this.player.maxHp;
+    this.player.invuln = 0.5; // 短暂无敌缓冲
+    this.floatTexts.push(new FloatText(this.player.x, this.player.y - 30, "生命恢复!", "#51cf66", 16));
+    // 本回合道具不保留到下一波（下一波重新选择）
+    this.item = null;
+    this.player.shield = 0;
+    this.bomb = null;
+    this.homingBullets = [];
+    this.trackTimer = 0;
+    // 从第 2 波起：每波成功后进入增益选择（肉鸽爬塔）
+    if (this.wave >= 2) {
+      this.waveState = "reward";
+      this.rewardOptions = [
+        { id: "hp",    name: "生命 +5",  icon: "♥" },
+        { id: "speed", name: "攻速 +5%", icon: "⚡" },
+        { id: "laser", name: "激光 +5",  icon: "◉" },
+      ];
+      this.rewardHover = -1;
+    }
+  }
+
+  // 选择增益（1/2/3 键或鼠标点击）
+  applyReward(id) {
+    const p = this.player;
+    if (id === "hp") {
+      p.maxHp += 5;
+      p.hp = Math.min(p.hp + 5, p.maxHp);
+    } else if (id === "speed") {
+      p.fireInterval = Math.max(0.05, p.fireInterval * 0.95);
+    } else if (id === "laser") {
+      p.laserCharges += 5;
+    }
+    this.waveState = "intermission";
+    this.intermissionTimer = 1.5;
+    this.rewardOptions = null;
+    // 从第 3 波起：开战前再选择本回合一次性道具
+    if (this.wave + 1 >= 3) {
+      this.waveState = "item";
+      this.itemOptions = [
+        { id: "shield", name: "护盾",     icon: "◈" },
+        { id: "bomb",   name: "炸弹",     icon: "●" },
+        { id: "track",  name: "自动追踪", icon: "◎" },
+      ];
+      this.rewardHover = -1;
+    }
+  }
+
+  // 选择本回合道具（1/2/3 键或鼠标点击）
+  applyItem(id) {
+    if (id === "shield") {
+      this.player.shield = 10;
+      this.item = { id: "shield" };
+    } else if (id === "bomb") {
+      this.item = { id: "bomb", count: 1 };
+    } else if (id === "track") {
+      this.item = { id: "track" };
+      this.trackTimer = 0;
+    }
+    this.waveState = "intermission";
+    this.intermissionTimer = 1.5;
+    this.itemOptions = null;
+  }
+
+  // 发射炸弹（X 键，仅本回合有炸弹道具时可用）
+  launchBomb() {
+    if (this.waveState !== "fighting") return false;
+    if (!this.item || this.item.id !== "bomb" || this.item.count <= 0) return false;
+    this.item.count--;
+    // 直线向上飞行，接触敌人或抵达屏幕顶部时爆炸
+    this.bomb = { x: this.player.x, y: this.player.y - 20, vy: -430, r: 7 };
+    return true;
+  }
+
+  // 华丽爆炸特效：冲击波圆环 + 核心闪光 + 热火花 + 烟雾
+  explosion(x, y, color = "#ffd43b", scale = 1) {
+    this.shockwaves.push({ x, y, r: 8, speed: 540 * scale, life: 0.35, maxLife: 0.35, color: "#fff6d0", width: 6 });
+    this.shockwaves.push({ x, y, r: 4, speed: 300 * scale, life: 0.55, maxLife: 0.55, color, width: 3 });
+    // 核心闪光
+    this.particles.push(new Particle(x, y, 0, 0, 0.22, 36 * scale, "#ffffff"));
+    // 热火花
+    for (let i = 0; i < 24 * scale; i++) {
+      const ang = rand(0, Math.PI * 2);
+      const sp = rand(80, 430) * scale;
+      this.particles.push(new Particle(x, y, Math.cos(ang) * sp, Math.sin(ang) * sp, rand(0.3, 0.7), rand(2, 4.5), i % 3 === 0 ? "#ffffff" : color));
+    }
+    // 烟雾
+    for (let i = 0; i < 10 * scale; i++) {
+      const ang = rand(0, Math.PI * 2);
+      const sp = rand(20, 110);
+      this.particles.push(new Particle(x, y, Math.cos(ang) * sp, Math.sin(ang) * sp - 20, rand(0.6, 1.1), rand(6, 12), "#4a4a5e"));
+    }
+    this.screenShake = Math.max(this.screenShake, 0.35);
+  }
+
+  choiceCardLayout() {
+    const cw = 164, ch = 132, gap = 24;
+    return {
+      cw, ch, gap,
+      x0: (W - (cw * 3 + gap * 2)) / 2,
+      y0: H / 2 - 52,
+    };
+  }
+
+  // 根据鼠标坐标返回选中的卡片索引（-1 = 未选中；增益/道具共用布局）
+  cardAt(mx, my) {
+    const opts = this.rewardOptions || this.itemOptions;
+    if (!opts || this.choiceAnimation || mx < 0 || my < 0) return -1;
+    const { cw, ch, gap, x0, y0 } = this.choiceCardLayout();
+    for (let i = 0; i < opts.length; i++) {
+      const x = x0 + i * (cw + gap);
+      if (mx >= x && mx <= x + cw && my >= y0 && my <= y0 + ch) return i;
+    }
+    return -1;
+  }
+
+  choiceAccent(id) {
+    return {
+      hp: "#ff6b8a",
+      speed: "#ffd43b",
+      laser: "#6ee7ff",
+      shield: "#69dbff",
+      bomb: "#ff9f43",
+      track: "#ffe066",
+    }[id] || "#7ef0ff";
+  }
+
+  startChoiceSelection(index) {
+    const opts = this.rewardOptions || this.itemOptions;
+    if (!opts || this.choiceAnimation || !opts[index]) return false;
+    if (this.waveState !== "reward" && this.waveState !== "item") return false;
+    this.choiceAnimation = {
+      index,
+      id: opts[index].id,
+      kind: this.waveState,
+      elapsed: 0,
+      duration: 0.78,
+    };
+    this.rewardHover = -1;
+    canvas.style.cursor = "default";
+    return true;
+  }
+
+  drawChoiceCard(opt, cx, cy, w, h, state = {}) {
+    const alpha = state.alpha ?? 1;
+    if (alpha <= 0) return;
+    const scale = state.scale ?? 1;
+    const scaleX = state.scaleX ?? 1;
+    const hover = !!state.hover;
+    const selected = !!state.selected;
+    const back = !!state.back;
+    const accent = this.choiceAccent(opt.id);
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(cx, cy);
+    ctx.scale(Math.max(0.001, scale * scaleX), Math.max(0.001, scale));
+
+    const x = -w / 2, y = -h / 2;
+    const fill = ctx.createLinearGradient(0, y, 0, y + h);
+    fill.addColorStop(0, hover || selected ? "rgba(35,61,105,0.96)" : "rgba(22,39,72,0.94)");
+    fill.addColorStop(1, back ? "rgba(9,18,38,0.98)" : "rgba(11,23,47,0.98)");
+
+    ctx.shadowColor = accent;
+    ctx.shadowBlur = hover || selected ? 24 : 8;
+    roundedRectPath(x, y, w, h, 7);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    roundedRectPath(x + 1, y + 1, w - 2, h - 2, 6);
+    ctx.strokeStyle = hover || selected ? accent : "#35547f";
+    ctx.lineWidth = hover || selected ? 2.5 : 1.25;
+    ctx.stroke();
+
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-26, y + 1.5);
+    ctx.lineTo(26, y + 1.5);
+    ctx.stroke();
+
+    if (back) {
+      ctx.save();
+      ctx.rotate(Math.PI / 4);
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-17, -17, 34, 34);
+      ctx.globalAlpha *= 0.45;
+      ctx.strokeRect(-9, -9, 18, 18);
+      ctx.restore();
+    } else {
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.font = "32px 'Segoe UI', sans-serif";
+      ctx.fillStyle = hover || selected ? "#ffffff" : accent;
+      ctx.shadowColor = accent;
+      ctx.shadowBlur = hover || selected ? 14 : 5;
+      ctx.fillText(opt.icon, 0, -18);
+      ctx.shadowBlur = 0;
+      ctx.font = "bold 19px 'Segoe UI', sans-serif";
+      ctx.fillStyle = hover || selected ? "#ffffff" : "#dcebff";
+      ctx.fillText(opt.name, 0, 28);
+    }
+    ctx.restore();
+  }
+
+  // 发射玩家激光（无前摇，消耗 1 次）
+  firePlayerLaser() {
+    if (this.paused || this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "item") return false;
+    if (this.player.laserCharges <= 0) return false;
+    this.player.laserCharges--;
+    this.playerLasers.push({ x: this.player.x, t: 0.35, damage: 20, hit: new Set() });
+    this.screenShake = Math.max(this.screenShake, 0.15);
+    return true;
+  }
+
+  gameOver() {
+    this.waveState = "gameover";
+    this.paused = false;
+    this.explosion(this.player.x, this.player.y, "#4dd0ff", 1.6);
+    this.screenShake = 0.5;
+  }
+
+  togglePause() {
+    // 增益/道具选择界面本身需要等待玩家操作，不额外叠加暂停状态。
+    if (this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "item") return;
+    this.paused = !this.paused;
+  }
+
+  draw() {
+    ctx.save();
+    // 屏幕震动
+    if (this.screenShake > 0) {
+      ctx.translate(rand(-4, 4) * this.screenShake * 2, rand(-4, 4) * this.screenShake * 2);
+    }
+
+    // 背景
+    ctx.fillStyle = "#060a14";
+    ctx.fillRect(-10, -10, W + 20, H + 20);
+
+    // 星星
+    for (const s of this.stars) {
+      ctx.fillStyle = `rgba(200,220,255,${0.3 + (s.s / 2.2) * 0.5})`;
+      ctx.fillRect(s.x, s.y, s.s, s.s);
+    }
+
+    // 子弹
+    for (const b of this.bullets) b.draw();
+    for (const b of this.enemyBullets) b.draw();
+
+    // 敌人
+    for (const e of this.enemies) e.draw();
+
+    // 玩家激光（画在敌人之上）
+    for (const l of this.playerLasers) {
+      const topY = -10;
+      const botY = this.player.y - this.player.r - 8;
+      ctx.shadowColor = "#4dd0ff";
+      ctx.shadowBlur = 16;
+      ctx.strokeStyle = "rgba(150,235,255,0.85)";
+      ctx.lineWidth = 10;
+      ctx.beginPath();
+      ctx.moveTo(l.x, topY);
+      ctx.lineTo(l.x, botY);
+      ctx.stroke();
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 4;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
+
+    // 自动追踪子弹
+    for (const hb of this.homingBullets) {
+      ctx.fillStyle = "#ffe066";
+      ctx.shadowColor = "#ffd43b";
+      ctx.shadowBlur = 8;
+      ctx.beginPath();
+      ctx.arc(hb.x, hb.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    // 炸弹（飞行中的弹体）
+    if (this.bomb) {
+      ctx.fillStyle = "#ff6b3d";
+      ctx.shadowColor = "#ff3b30";
+      ctx.shadowBlur = 14;
+      ctx.beginPath();
+      ctx.arc(this.bomb.x, this.bomb.y, this.bomb.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ffd43b";
+      ctx.beginPath();
+      ctx.arc(this.bomb.x - 3, this.bomb.y - 3, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    // 玩家
+    if (this.waveState !== "gameover") this.player.draw();
+
+    // 粒子 & 文字
+    for (const p of this.particles) p.draw();
+    for (const t of this.floatTexts) t.draw();
+
+    // 冲击波圆环
+    for (const s of this.shockwaves) {
+      const a = clamp(s.life / s.maxLife, 0, 1);
+      ctx.globalAlpha = a * 0.9;
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = s.width * a + 0.5;
+      ctx.shadowColor = s.color;
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- HUD ----
+    this.drawHUD();
+
+    // ---- 波次提示 ----
+    if (this.waveState === "intermission" && this.wave >= 0) {
+      const next = this.wave + 1;
+      const a = clamp(this.intermissionTimer / 2, 0, 1);
+      ctx.globalAlpha = a;
+      ctx.font = "bold 34px 'Segoe UI', sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#9fd8ff";
+      ctx.shadowColor = "#4dd0ff";
+      ctx.shadowBlur = 18;
+      ctx.fillText("第 " + next + " 波来袭", W / 2, H / 2 - 20);
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1;
+    }
+
+    // ---- 卡片选择界面（增益 / 本回合道具） ----
+    const cardOpts = this.rewardOptions || this.itemOptions;
+    if ((this.waveState === "reward" || this.waveState === "item") && cardOpts) {
+      this.rewardHover = this.cardAt(this.mouseX, this.mouseY);
+      const animation = this.choiceAnimation;
+      const progress = animation ? clamp(animation.elapsed / animation.duration, 0, 1) : 0;
+      ctx.fillStyle = "rgba(5,8,16,0.82)";
+      ctx.fillRect(-10, -10, W + 20, H + 20);
+
+      const headingAlpha = animation ? 1 - easeOutCubic(clamp(progress / 0.5, 0, 1)) : 1;
+      ctx.save();
+      ctx.globalAlpha = headingAlpha;
+      ctx.textAlign = "center";
+      ctx.font = "bold 16px 'Segoe UI', sans-serif";
+      ctx.fillStyle = "#9fd8ff";
+      if (this.waveState === "reward") {
+        ctx.fillText("第 " + this.wave + " 波通关！", W / 2, H / 2 - 205);
+      } else {
+        ctx.fillText("道具仅限本回合使用，下一波重新选择", W / 2, H / 2 - 205);
+      }
+      ctx.font = "bold 30px 'Segoe UI', sans-serif";
+      ctx.fillStyle = "#ffd43b";
+      ctx.shadowColor = "#ffd43b";
+      ctx.shadowBlur = 12;
+      ctx.fillText(this.waveState === "reward" ? "选择增益" : "选择本回合道具", W / 2, H / 2 - 170);
+      ctx.shadowBlur = 0;
+      ctx.restore();
+
+      const { cw, ch, gap, x0, y0 } = this.choiceCardLayout();
+      const selectedBaseX = animation ? x0 + animation.index * (cw + gap) + cw / 2 : W / 2;
+      cardOpts.forEach((opt, i) => {
+        const baseX = x0 + i * (cw + gap) + cw / 2;
+        const baseY = y0 + ch / 2;
+
+        if (!animation) {
+          const hover = i === this.rewardHover;
+          this.drawChoiceCard(opt, baseX, baseY - (hover ? 4 : 0), cw, ch, {
+            hover,
+            scale: hover ? 1.035 : 1,
+          });
+          return;
+        }
+
+        if (i !== animation.index) {
+          const fadeProgress = clamp(progress / 0.42, 0, 1);
+          const direction = Math.sign(baseX - selectedBaseX);
+          this.drawChoiceCard(opt, baseX + direction * 30 * easeOutCubic(fadeProgress), baseY, cw, ch, {
+            alpha: 1 - easeOutCubic(fadeProgress),
+            scale: 1 - 0.1 * fadeProgress,
+          });
+          return;
+        }
+
+        const travel = easeInOutCubic(progress);
+        const cardX = baseX + (W / 2 - baseX) * travel;
+        const cardY = baseY + (H / 2 + 12 - baseY) * travel;
+        const shrinkProgress = clamp((progress - 0.18) / 0.82, 0, 1);
+        const confirmBump = progress < 0.18 ? 0.055 * Math.sin((progress / 0.18) * Math.PI) : 0;
+        const cardScale = Math.max(0, 1 + confirmBump - easeInCubic(shrinkProgress));
+        const flipProgress = clamp(progress / 0.78, 0, 1);
+        const flip = Math.cos(flipProgress * Math.PI);
+        const cardAlpha = 1 - easeInCubic(clamp((progress - 0.82) / 0.18, 0, 1));
+
+        const ringProgress = clamp(progress / 0.52, 0, 1);
+        ctx.save();
+        ctx.globalAlpha = (1 - ringProgress) * 0.7;
+        ctx.strokeStyle = this.choiceAccent(opt.id);
+        ctx.lineWidth = 2.5 * (1 - ringProgress) + 0.5;
+        roundedRectPath(
+          cardX - cw / 2 - 22 * ringProgress,
+          cardY - ch / 2 - 14 * ringProgress,
+          cw + 44 * ringProgress,
+          ch + 28 * ringProgress,
+          7 + 5 * ringProgress
+        );
+        ctx.stroke();
+        ctx.restore();
+
+        this.drawChoiceCard(opt, cardX, cardY, cw, ch, {
+          alpha: cardAlpha,
+          scale: cardScale,
+          scaleX: Math.max(0.035, Math.abs(flip)),
+          selected: true,
+          back: flip < 0,
+        });
+      });
+    }
+
+    // ---- 结算画面 ----
+    if (this.waveState === "gameover") {
+      ctx.fillStyle = "rgba(5,8,16,0.72)";
+      ctx.fillRect(-10, -10, W + 20, H + 20);
+      ctx.textAlign = "center";
+      ctx.font = "bold 44px 'Segoe UI', sans-serif";
+      ctx.fillStyle = "#ff6b6b";
+      ctx.shadowColor = "#ff6b6b";
+      ctx.shadowBlur = 20;
+      ctx.fillText("游戏结束", W / 2, H / 2 - 60);
+      ctx.shadowBlur = 0;
+      ctx.font = "22px 'Segoe UI', sans-serif";
+      ctx.fillStyle = "#cfe3ff";
+      ctx.fillText("得分: " + this.score + "   到达波次: " + this.wave, W / 2, H / 2 - 10);
+      ctx.font = "18px 'Segoe UI', sans-serif";
+      ctx.fillStyle = "#7ef0ff";
+      ctx.fillText("按 R 键重新开始", W / 2, H / 2 + 40);
+    }
+
+    // ---- 暂停画面 ----
+    if (this.paused) {
+      ctx.fillStyle = "rgba(5,8,16,0.68)";
+      ctx.fillRect(-10, -10, W + 20, H + 20);
+      ctx.textAlign = "center";
+      ctx.font = "bold 42px 'Segoe UI', sans-serif";
+      ctx.fillStyle = "#cfe3ff";
+      ctx.shadowColor = "#4dd0ff";
+      ctx.shadowBlur = 18;
+      ctx.fillText("游戏暂停", W / 2, H / 2 - 18);
+      ctx.shadowBlur = 0;
+      ctx.font = "18px 'Segoe UI', sans-serif";
+      ctx.fillStyle = "#9fd8ff";
+      ctx.fillText("按 Esc 继续", W / 2, H / 2 + 28);
+    }
+
+    ctx.restore();
+  }
+
+  drawHUD() {
+    // 玩家血量条
+    const bw = 220, bh = 16;
+    const bx = 16, by = 14;
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(bx - 2, by - 2, bw + 4, bh + 4);
+    const ratio = clamp(this.player.hp / this.player.maxHp, 0, 1);
+    const grad = ctx.createLinearGradient(bx, by, bx + bw, by);
+    grad.addColorStop(0, ratio > 0.3 ? "#4dd0ff" : "#ff6b6b");
+    grad.addColorStop(1, ratio > 0.3 ? "#7ef0ff" : "#ff9f9f");
+    ctx.fillStyle = grad;
+    ctx.fillRect(bx, by, bw * ratio, bh);
+    ctx.font = "bold 13px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "#eaffff";
+    ctx.textAlign = "left";
+    ctx.fillText("HP " + Math.ceil(this.player.hp) + " / " + this.player.maxHp, bx + 6, by + 13);
+
+    // 得分 & 波次（右上）
+    ctx.textAlign = "right";
+    ctx.font = "bold 20px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "#ffd43b";
+    ctx.fillText("得分 " + this.score, W - 16, 32);
+    ctx.font = "15px 'Segoe UI', sans-serif";
+    ctx.fillStyle = "#9fd8ff";
+    ctx.fillText("波次 " + this.wave + (this.waveState === "fighting" ? "  ·  击杀 " + this.waveKills + "/" + this.waveQuota : ""), W - 16, 54);
+
+    // 激光剩余次数（左下角）
+    ctx.textAlign = "left";
+    ctx.font = "bold 17px 'Segoe UI', sans-serif";
+    ctx.fillStyle = this.player.laserCharges > 0 ? "#7ef0ff" : "#557799";
+    ctx.fillText("◉ 激光 ×" + this.player.laserCharges, 16, H - 18);
+
+    // 本回合道具（左下角）
+    if (this.item) {
+      ctx.font = "bold 15px 'Segoe UI', sans-serif";
+      if (this.item.id === "shield") {
+        ctx.fillStyle = this.player.shield > 0 ? "#7ef0ff" : "#557799";
+        ctx.fillText("◈ 护盾 " + this.player.shield, 16, H - 42);
+      } else if (this.item.id === "bomb") {
+        ctx.fillStyle = this.item.count > 0 ? "#ff9f43" : "#557799";
+        ctx.fillText("● 炸弹 ×" + this.item.count + "（按 X 投掷）", 16, H - 42);
+      } else if (this.item.id === "track") {
+        ctx.fillStyle = "#ffe066";
+        ctx.fillText("◎ 自动追踪", 16, H - 42);
+      }
+    }
+  }
+}
+
+// ---------- 输入 ----------
+const input = { left: false, right: false, up: false, down: false };
+
+// 选择当前卡片（增益或道具，1/2/3 键与鼠标点击共用）
+function chooseCard(i) {
+  if (!game) return;
+  game.startChoiceSelection(i);
+}
+
+window.addEventListener("keydown", (e) => {
+  switch (e.code) {
+    case "Escape":
+      e.preventDefault();
+      if (game) game.togglePause();
+      break;
+    case "ArrowLeft": case "KeyA": input.left = true; break;
+    case "ArrowRight": case "KeyD": input.right = true; break;
+    case "ArrowUp": case "KeyW": input.up = true; break;
+    case "ArrowDown": case "KeyS": input.down = true; break;
+    case "Space":
+      e.preventDefault();
+      if (game) game.firePlayerLaser();
+      break;
+    case "KeyX":
+      e.preventDefault();
+      if (game) game.launchBomb();
+      break;
+    case "Digit1": case "Numpad1": chooseCard(0); break;
+    case "Digit2": case "Numpad2": chooseCard(1); break;
+    case "Digit3": case "Numpad3": chooseCard(2); break;
+    case "KeyR":
+      if (game && game.waveState === "gameover") { game = new Game(); }
+      break;
+  }
+});
+window.addEventListener("keyup", (e) => {
+  switch (e.code) {
+    case "ArrowLeft": case "KeyA": input.left = false; break;
+    case "ArrowRight": case "KeyD": input.right = false; break;
+    case "ArrowUp": case "KeyW": input.up = false; break;
+    case "ArrowDown": case "KeyS": input.down = false; break;
+  }
+});
+
+// 鼠标：悬停高亮 + 点击选择增益
+canvas.addEventListener("mousemove", (e) => {
+  if (!game) return;
+  const rect = canvas.getBoundingClientRect();
+  game.mouseX = (e.clientX - rect.left) * (W / rect.width);
+  game.mouseY = (e.clientY - rect.top) * (H / rect.height);
+  canvas.style.cursor = game.cardAt(game.mouseX, game.mouseY) >= 0 ? "pointer" : "default";
+});
+canvas.addEventListener("click", (e) => {
+  if (!game) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX - rect.left) * (W / rect.width);
+  const my = (e.clientY - rect.top) * (H / rect.height);
+  const i = game.cardAt(mx, my);
+  if (i >= 0) chooseCard(i);
+});
+
+// ---------- 主循环 ----------
+let last = performance.now();
+game = new Game();
+
+function loop(now) {
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  game.update(dt, input);
+  game.draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
