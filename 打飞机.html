@@ -68,72 +68,24 @@ const H = canvas.height;
 
 // ---------- 游戏状态 ----------
 let game = null;
-let audioContext = null;
+let killAudioTemplate = null;
 
 function ensureAudio() {
-  if (!audioContext) {
-    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextCtor) return null;
-    audioContext = new AudioContextCtor();
+  if (!killAudioTemplate) {
+    killAudioTemplate = new Audio("assets/kill-sound.wav");
+    killAudioTemplate.preload = "auto";
+    killAudioTemplate.volume = 0.72;
+    killAudioTemplate.load();
   }
-  if (audioContext.state === "suspended") audioContext.resume().catch(() => {});
-  return audioContext;
+  return killAudioTemplate;
 }
 
 function playKillSound() {
-  const audio = ensureAudio();
-  if (!audio) return;
-  const now = audio.currentTime;
-  // 快速错开的金属音符，模拟一串硬币连续落地。
-  const notes = [
-    [0.00, 1320, 0.085], [0.035, 1760, 0.075], [0.082, 1490, 0.09],
-    [0.13, 2120, 0.07], [0.17, 1870, 0.085], [0.22, 2440, 0.065],
-    [0.27, 2040, 0.10],
-  ];
-  for (const [delay, frequency, duration] of notes) {
-    const start = now + delay;
-    const end = start + duration;
-    const coin = audio.createOscillator();
-    const overtone = audio.createOscillator();
-    const coinGain = audio.createGain();
-    const overtoneGain = audio.createGain();
-    coin.type = "triangle";
-    overtone.type = "sine";
-    coin.frequency.setValueAtTime(frequency, start);
-    coin.frequency.exponentialRampToValueAtTime(frequency * 0.62, end);
-    overtone.frequency.setValueAtTime(frequency * 2.03, start);
-    overtone.frequency.exponentialRampToValueAtTime(frequency * 1.35, end);
-    coinGain.gain.setValueAtTime(0.0001, start);
-    coinGain.gain.exponentialRampToValueAtTime(0.065, start + 0.004);
-    coinGain.gain.exponentialRampToValueAtTime(0.0001, end);
-    overtoneGain.gain.setValueAtTime(0.0001, start);
-    overtoneGain.gain.exponentialRampToValueAtTime(0.028, start + 0.003);
-    overtoneGain.gain.exponentialRampToValueAtTime(0.0001, end - 0.002);
-    coin.connect(coinGain);
-    overtone.connect(overtoneGain);
-    coinGain.connect(audio.destination);
-    overtoneGain.connect(audio.destination);
-    coin.start(start); coin.stop(end);
-    overtone.start(start); overtone.stop(end);
-  }
-
-  // 极短的高频噪声，补一点硬币互相敲击的颗粒感。
-  const length = Math.floor(audio.sampleRate * 0.025);
-  const buffer = audio.createBuffer(1, length, audio.sampleRate);
-  const data = buffer.getChannelData(0);
-  for (let i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
-  const noise = audio.createBufferSource();
-  const filter = audio.createBiquadFilter();
-  const noiseGain = audio.createGain();
-  filter.type = "highpass";
-  filter.frequency.setValueAtTime(2600, now);
-  noiseGain.gain.setValueAtTime(0.025, now);
-  noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.025);
-  noise.buffer = buffer;
-  noise.connect(filter);
-  filter.connect(noiseGain);
-  noiseGain.connect(audio.destination);
-  noise.start(now); noise.stop(now + 0.025);
+  const template = ensureAudio();
+  if (!template) return;
+  const sound = template.cloneNode();
+  sound.volume = template.volume;
+  sound.play().catch(() => {});
 }
 
 // ---------- 工具函数 ----------
@@ -1464,26 +1416,6 @@ canvas.addEventListener("click", (e) => {
 // ---------- 主循环 ----------
 let last = performance.now();
 game = new Game();
-
-// Temporary browser QA entry; removed after tracking verification.
-if (new URLSearchParams(location.search).get("preview") === "homing") {
-  game.wave = 3;
-  game.waveState = "fighting";
-  game.item = { id: "track" };
-  game.trackTimer = 0;
-  const qaTarget = new Enemy("tank", 300, 220);
-  const qaOther = new Enemy("tank", 600, 220);
-  for (const e of [qaTarget, qaOther]) {
-    e.phase = "battle";
-    e.wobbleAmp = 0;
-    e.fireTimer = 999;
-  }
-  game.enemies = [qaTarget, qaOther];
-  setTimeout(() => {
-    game.item = null;
-    game.killEnemy(qaTarget, false);
-  }, 350);
-}
 
 function loop(now) {
   const dt = Math.min((now - last) / 1000, 0.05);
