@@ -70,34 +70,60 @@ const H = canvas.height;
 let game = null;
 let killAudioTemplate = null;
 let bombAudioTemplate = null;
+let backgroundAudio = null;
 let soundContext = null;
 let soundMasterGain = null;
-const audioSettings = { volume: 0.72, muted: false };
+const audioSettings = {
+  bgmVolume: 0.72,
+  bgmMuted: false,
+  effectsVolume: 0.72,
+  effectsMuted: false,
+};
 const activeAudioNodes = new Set();
 
-function effectiveAudioVolume() {
-  return audioSettings.muted ? 0 : audioSettings.volume;
+function effectiveBgmVolume() {
+  return audioSettings.bgmMuted ? 0 : audioSettings.bgmVolume;
 }
 
-function setAudioVolume(value, unmute = false) {
-  audioSettings.volume = clamp(value, 0, 1);
-  if (unmute) audioSettings.muted = false;
-  for (const sound of activeAudioNodes) sound.volume = sound.baseVolume * effectiveAudioVolume();
-  if (soundMasterGain && soundContext) {
-    soundMasterGain.gain.setTargetAtTime(effectiveAudioVolume(), soundContext.currentTime, 0.01);
+function effectiveEffectsVolume() {
+  return audioSettings.effectsMuted ? 0 : audioSettings.effectsVolume;
+}
+
+function setBgmVolume(value, unmute = false) {
+  audioSettings.bgmVolume = clamp(value, 0, 1);
+  if (unmute) audioSettings.bgmMuted = false;
+  if (backgroundAudio) {
+    backgroundAudio.volume = backgroundAudio.baseVolume * effectiveBgmVolume();
+    if (effectiveBgmVolume() <= 0) backgroundAudio.pause();
+    else if (game && !game.paused && game.waveState !== "gameover") startBackgroundMusic();
   }
 }
 
-function toggleAudioMute() {
-  audioSettings.muted = !audioSettings.muted;
-  setAudioVolume(audioSettings.volume);
+function setEffectsVolume(value, unmute = false) {
+  audioSettings.effectsVolume = clamp(value, 0, 1);
+  if (unmute) audioSettings.effectsMuted = false;
+  for (const sound of activeAudioNodes) sound.volume = sound.baseVolume * effectiveEffectsVolume();
+  if (soundMasterGain && soundContext) {
+    soundMasterGain.gain.setTargetAtTime(effectiveEffectsVolume(), soundContext.currentTime, 0.01);
+  }
 }
 
-function createAudioTemplate(src, volume) {
+function toggleBgmMute() {
+  audioSettings.bgmMuted = !audioSettings.bgmMuted;
+  setBgmVolume(audioSettings.bgmVolume);
+}
+
+function toggleEffectsMute() {
+  audioSettings.effectsMuted = !audioSettings.effectsMuted;
+  setEffectsVolume(audioSettings.effectsVolume);
+}
+
+function createAudioTemplate(src, volume, channel = "effects") {
   const audio = new Audio(src);
   audio.preload = "auto";
   audio.baseVolume = volume;
-  audio.volume = volume * effectiveAudioVolume();
+  audio.audioChannel = channel;
+  audio.volume = volume * (channel === "bgm" ? effectiveBgmVolume() : effectiveEffectsVolume());
   audio.load();
   return audio;
 }
@@ -107,14 +133,30 @@ function ensureAudio() {
     killAudioTemplate = createAudioTemplate("assets/kill-sound.wav", 0.72);
   }
   if (!bombAudioTemplate) bombAudioTemplate = createAudioTemplate("assets/bomb-explosion.wav", 0.78);
+  if (!backgroundAudio) {
+    backgroundAudio = createAudioTemplate("assets/background-music.mp3", 0.3, "bgm");
+    backgroundAudio.loop = true;
+  }
+  startBackgroundMusic();
   return killAudioTemplate;
+}
+
+function startBackgroundMusic() {
+  if (!backgroundAudio || effectiveBgmVolume() <= 0 || (game && (game.paused || game.waveState === "gameover"))) return;
+  backgroundAudio.volume = backgroundAudio.baseVolume * effectiveBgmVolume();
+  backgroundAudio.play().catch(() => {});
+}
+
+function pauseBackgroundMusic() {
+  if (backgroundAudio) backgroundAudio.pause();
 }
 
 function playAudioTemplate(template) {
   if (!template) return;
   const sound = template.cloneNode();
   sound.baseVolume = template.baseVolume;
-  sound.volume = sound.baseVolume * effectiveAudioVolume();
+  sound.audioChannel = template.audioChannel;
+  sound.volume = sound.baseVolume * effectiveEffectsVolume();
   activeAudioNodes.add(sound);
   sound.addEventListener("ended", () => activeAudioNodes.delete(sound), { once: true });
   sound.play().catch(() => activeAudioNodes.delete(sound));
@@ -135,7 +177,7 @@ function ensureSoundContext() {
     if (!AudioContextCtor) return null;
     soundContext = new AudioContextCtor();
     soundMasterGain = soundContext.createGain();
-    soundMasterGain.gain.value = effectiveAudioVolume();
+    soundMasterGain.gain.value = effectiveEffectsVolume();
     soundMasterGain.connect(soundContext.destination);
   }
   if (soundContext.state === "suspended") soundContext.resume().catch(() => {});
@@ -289,8 +331,9 @@ class Bullet {
 const ENEMY_TYPES = {
   scout: { name: "侦察机", hp: 1,  r: 14, speed: 280, gold: 10,  color: "#ff6b6b",  fireRate: 0, burstChance: 0 },
   grunt: { name: "步兵机", hp: 3,  r: 18, speed: 75,  gold: 20,  color: "#ffa94d",  fireRate: 2.0, burstChance: 0 },
-  tank:  { name: "装甲机", hp: 9,  r: 26, speed: 38,  gold: 50,  color: "#c0a0ff",  fireRate: 2.0, burstChance: 0.35, burst: { min: 3, max: 6 } },
-  elite: { name: "精英机", hp: 40, r: 32, speed: 55,  gold: 120, color: "#ff5ec8",  fireRate: 2.4, burstChance: 0 },
+  tank:  { name: "装甲机", hp: 9,  r: 26, speed: 38,  gold: 50,  color: "#c0a0ff",  fireRate: 3.0, burstChance: 1, burst: { min: 3, max: 6 } },
+  spinner: { name: "环射机", hp: 9, r: 22, speed: 60, gold: 60, color: "#57e3b5", fireRate: 4.4, burstChance: 0, radial: { count: 14, duration: 1.0, speed: 130 } },
+  elite: { name: "精英机", hp: 40, r: 32, speed: 45,  gold: 120, color: "#ff5ec8",  fireRate: 2.4, burstChance: 0 },
 };
 
 class Enemy {
@@ -305,12 +348,13 @@ class Enemy {
     this.gold = t.gold;
     this.color = t.color;
     this.x = x; this.y = y;
-    // 进入屏幕时先向下移动，到位后左右摇摆
+    // 高级敌机停留在更靠上的安全区域，给玩家留下观察和躲避弹幕的距离。
+    const staysUpper = type === "tank" || type === "spinner" || type === "elite";
     this.phase = "enter";
-    this.enterY = rand(70, H * 0.45);
+    this.enterY = staysUpper ? rand(65, H * 0.34) : rand(70, H * 0.45);
     this.wobble = rand(0, Math.PI * 2);
-    this.wobbleSpeed = rand(1.2, 2.4);
-    this.wobbleAmp = rand(20, 60);
+    this.wobbleSpeed = type === "elite" ? rand(0.55, 0.9) : rand(1.2, 2.4);
+    this.wobbleAmp = type === "elite" ? rand(16, 32) : rand(20, 60);
     this.fireTimer = rand(0.8, 2);
     this.flash = 0; // 受击闪白
     this.burst = 0;      // 连射剩余颗数
@@ -319,6 +363,11 @@ class Enemy {
     this.laser = 0;      // 激光持续剩余时间
     this.laserDir = { x: 0, y: 1 };
     this.lockX = 0; this.lockY = 0; // 蓄力时锁定的目标位置
+    this.radialShots = 0;       // 环形弹幕剩余子弹数
+    this.radialTimer = 0;       // 下一颗环形子弹的发射计时
+    this.radialAngle = 0;       // 下一颗环形子弹的方向
+    this.radialStartAngle = 0;  // 环形弹幕起始方向，用于绘制释放进度
+    this.radialStep = 0;
     this.gone = false;   // 侦察机飞出屏幕标记
     this.facing = Math.PI / 2; // 机头朝向（默认朝下，每帧转向玩家）
   }
@@ -339,8 +388,8 @@ class Enemy {
     } else {
       this.x += Math.cos(this.wobble) * this.wobbleAmp * dt * 1.6;
       this.wobble += this.wobbleSpeed * dt;
-      // 装甲机/精英机：停留在屏幕上方持续射击；其余缓慢向玩家逼近
-      if (game.player && this.type !== "tank" && this.type !== "elite") {
+      // 装甲机/环射机/精英机停留在屏幕上方持续攻击；其余缓慢向玩家逼近。
+      if (game.player && this.type !== "tank" && this.type !== "spinner" && this.type !== "elite") {
         this.y += this.speed * 0.35 * dt;
       }
       if (this.y > H + 40) this.y = -40; // 循环
@@ -360,13 +409,14 @@ class Enemy {
     }
 
     // ---- 攻击逻辑 ----
-    const fr = ENEMY_TYPES[this.type].fireRate;
-    const burstChance = ENEMY_TYPES[this.type].burstChance || 0;
-    const burstCfg = ENEMY_TYPES[this.type].burst;
+    const enemyCfg = ENEMY_TYPES[this.type];
+    const fr = enemyCfg.fireRate;
+    const burstChance = enemyCfg.burstChance || 0;
+    const burstCfg = enemyCfg.burst;
     const canFire = game.player && this.y > 0; // 一入场（进入屏幕）即可准备攻击
     if (fr > 0 && canFire) {
       if (this.type === "elite") {
-        // 精英机：激光攻击（1 秒前摇 -> 发射 -> 冷却）
+        // 精英机只使用锁定激光：1 秒前摇 -> 发射 -> 冷却。
         if (this.charge > 0) {
           this.charge -= dt;
           if (this.charge <= 0) {
@@ -390,13 +440,43 @@ class Enemy {
         } else {
           this.fireTimer -= dt;
           if (this.fireTimer <= 0) {
-            this.charge = 1.0;          // 开始蓄力（前摇）
-            this.lockX = game.player.x; // 锁定玩家当前位置
+            this.charge = 1.0;
+            this.lockX = game.player.x;
             this.lockY = game.player.y;
           }
         }
+      } else if (this.type === "spinner") {
+        // 环射机：14 发子弹在 1 秒内沿顺时针方向依次覆盖一整圈。
+        this.fireTimer -= dt;
+        if (this.radialShots > 0) {
+          const radial = enemyCfg.radial;
+          this.radialTimer -= dt;
+          // 帧率波动时允许单帧补发，确保整轮仍能在 1 秒内完成。
+          while (this.radialTimer <= 0 && this.radialShots > 0) {
+            const angle = this.radialAngle;
+            const bx = this.x + Math.cos(angle) * this.r * 0.55;
+            const by = this.y + Math.sin(angle) * this.r * 0.55;
+            game.enemyBullets.push(new Bullet(
+              bx, by,
+              Math.cos(angle) * radial.speed,
+              Math.sin(angle) * radial.speed,
+              5, "#63f2c1", 4
+            ));
+            this.radialShots--;
+            this.radialAngle += this.radialStep;
+            this.radialTimer += radial.duration / radial.count;
+          }
+        } else if (this.fireTimer <= 0) {
+          const radial = enemyCfg.radial;
+          this.radialShots = radial.count;
+          this.radialTimer = 0;
+          this.radialStartAngle = rand(0, Math.PI * 2);
+          this.radialAngle = this.radialStartAngle;
+          this.radialStep = Math.PI * 2 / radial.count;
+          this.fireTimer = fr;
+        }
       } else {
-        // 普通单发 / 概率连射（连射颗数按类型配置）
+        // 步兵机固定单发；装甲机每 3 秒必定进行一次连射。
         this.fireTimer -= dt;
         if (this.burst > 0) {
           // 连射中：按间隔连续发射
@@ -409,8 +489,8 @@ class Enemy {
         } else if (this.fireTimer <= 0) {
           this.fireTimer = fr;
           if (burstCfg && Math.random() < burstChance) {
-            this.burst = randInt(burstCfg.min, burstCfg.max); // 连射（步兵机固定 3 颗）
-            this.burstTimer = 0;                              // 立即打出第一颗
+            this.burst = randInt(burstCfg.min, burstCfg.max);
+            this.burstTimer = 0; // 立即打出第一颗
           } else {
             game.enemyBullets.push(game.spawnEnemyBullet(this.nose().x, this.nose().y, game.player));
           }
@@ -446,7 +526,7 @@ class Enemy {
     ctx.arc(0, -this.r * 0.15, this.r * 0.35, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
-    // 精英机激光特效（前摇预警虚线 + 激光本体）
+    // 精英机激光特效（前摇预警线 + 激光本体）
     if (this.type === "elite") {
       const n = this.nose();
       const ox = n.x, oy = n.y;
@@ -481,6 +561,27 @@ class Enemy {
         ctx.stroke();
         ctx.shadowBlur = 0;
       }
+    }
+    // 环射机释放弹幕时显示顺时针进度光环。
+    if (this.type === "spinner" && this.radialShots > 0) {
+      const ringR = this.r + 9;
+      const pulse = 0.55 + 0.35 * Math.sin(this.radialShots * 1.8);
+      ctx.strokeStyle = `rgba(99, 242, 193, ${pulse.toFixed(3)})`;
+      ctx.lineWidth = 3;
+      ctx.shadowColor = "#63f2c1";
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, ringR, this.radialStartAngle, this.radialAngle);
+      ctx.stroke();
+      ctx.fillStyle = "#effff9";
+      ctx.beginPath();
+      ctx.arc(
+        this.x + Math.cos(this.radialAngle) * ringR,
+        this.y + Math.sin(this.radialAngle) * ringR,
+        3.5, 0, Math.PI * 2
+      );
+      ctx.fill();
+      ctx.shadowBlur = 0;
     }
     // 血条背景
     const bw = this.r * 2.4;
@@ -670,14 +771,29 @@ class Game {
     let type;
     if (n < 4) {
       // 前 3 波以最简单的侦察机为主
-      if (n >= 3 && roll < 0.1) type = "tank";      // 第 3 波起少量装甲机
+      if (n >= 3 && roll < 0.05) type = "tank";
+      else if (n >= 3 && roll < 0.1) type = "spinner";
       else if (roll < 0.3) type = "grunt";
       else type = "scout";
-    } else {
-      if (n >= 5 && roll < 0.12) type = "elite";
-      else if (roll < 0.38) type = "tank";
+    } else if (n === 4) {
+      // 第 4 波：装甲机和环射机各占原高级敌机概率的一半。
+      if (roll < 0.19) type = "tank";
+      else if (roll < 0.38) type = "spinner";
       else if (roll < 0.7) type = "grunt";
       else type = "scout";
+    } else {
+      // 精英机从第 5 波的 12% 起，每波增加 4%，第 12 波达到 40% 上限。
+      const eliteChance = Math.min(0.4, 0.12 + (n - 5) * 0.04);
+      if (roll < eliteChance) {
+        type = "elite";
+      } else {
+        // 剩余概率按原有比例分配，装甲机与环射机始终保持相同刷新率。
+        const nonEliteRoll = (roll - eliteChance) / (1 - eliteChance);
+        if (nonEliteRoll < 13 / 88) type = "tank";
+        else if (nonEliteRoll < 26 / 88) type = "spinner";
+        else if (nonEliteRoll < 58 / 88) type = "grunt";
+        else type = "scout";
+      }
     }
     // 波次越高，敌人血量越多
     return { type, hpMul: 1 + n * 0.15 };
@@ -959,7 +1075,7 @@ class Game {
       this.rewardOptions = [
         { id: "hp",    name: "生命 +5",  icon: "♥" },
         { id: "speed", name: "攻速 +5%", icon: "⚡" },
-        { id: "laser", name: "激光 +5",  icon: "◉" },
+        { id: "laser", name: "激光补满",  icon: "◉" },
       ];
       this.rewardHover = -1;
     }
@@ -996,7 +1112,7 @@ class Game {
     } else if (id === "speed") {
       p.fireInterval = Math.max(0.05, p.fireInterval * 0.95);
     } else if (id === "laser") {
-      p.laserCharges = Math.min(p.maxLaserCharges, p.laserCharges + 5);
+      p.laserCharges = p.maxLaserCharges;
     }
     this.waveState = "intermission";
     this.intermissionTimer = 1.5;
@@ -1291,6 +1407,7 @@ class Game {
   gameOver() {
     this.waveState = "gameover";
     this.paused = false;
+    pauseBackgroundMusic();
     this.explosion(this.player.x, this.player.y, "#4dd0ff", 1.6);
     this.screenShake = 0.5;
   }
@@ -1299,27 +1416,41 @@ class Game {
     // 增益/商店/道具界面本身需要等待玩家操作，不额外叠加暂停状态。
     if (this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "shop" || this.waveState === "item") return;
     this.paused = !this.paused;
+    if (this.paused) pauseBackgroundMusic();
+    else startBackgroundMusic();
   }
 
   pauseAudioLayout() {
-    const centerY = H / 2 + 92;
+    const bgmY = H / 2 + 104;
+    const effectsY = H / 2 + 164;
     return {
-      panel: { x: W / 2 - 220, y: H / 2 + 50, w: 440, h: 118 },
-      mute: { x: W / 2 - 166, y: centerY - 20, w: 40, h: 40 },
-      slider: { x: W / 2 - 102, y: centerY, w: 230, h: 8 },
+      panel: { x: W / 2 - 220, y: H / 2 + 48, w: 440, h: 166 },
+      bgm: {
+        label: "背景音乐",
+        mute: { x: W / 2 - 172, y: bgmY - 20, w: 40, h: 40 },
+        slider: { x: W / 2 - 104, y: bgmY, w: 232, h: 8 },
+      },
+      effects: {
+        label: "游戏音效",
+        mute: { x: W / 2 - 172, y: effectsY - 20, w: 40, h: 40 },
+        slider: { x: W / 2 - 104, y: effectsY, w: 232, h: 8 },
+      },
     };
   }
 
   pauseAudioControlAt(mx, my) {
     if (!this.paused) return null;
-    const { mute, slider } = this.pauseAudioLayout();
-    if (mx >= mute.x && mx <= mute.x + mute.w && my >= mute.y && my <= mute.y + mute.h) return "mute";
-    if (mx >= slider.x - 10 && mx <= slider.x + slider.w + 10 && my >= slider.y - 14 && my <= slider.y + 14) return "slider";
+    const { bgm, effects } = this.pauseAudioLayout();
+    for (const [channel, row] of [["bgm", bgm], ["effects", effects]]) {
+      const { mute, slider } = row;
+      if (mx >= mute.x && mx <= mute.x + mute.w && my >= mute.y && my <= mute.y + mute.h) return channel + "Mute";
+      if (mx >= slider.x - 10 && mx <= slider.x + slider.w + 10 && my >= slider.y - 14 && my <= slider.y + 14) return channel + "Slider";
+    }
     return null;
   }
 
   drawPauseAudioControls() {
-    const { panel, mute, slider } = this.pauseAudioLayout();
+    const { panel, bgm, effects } = this.pauseAudioLayout();
     const hovered = this.pauseAudioControlAt(this.mouseX, this.mouseY);
     ctx.save();
     roundedRectPath(panel.x, panel.y, panel.w, panel.h, 10);
@@ -1329,66 +1460,75 @@ class Game {
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    ctx.fillStyle = "#9fd8ff";
-    ctx.font = "14px 'Segoe UI', sans-serif";
-    ctx.textAlign = "left";
-    ctx.fillText("音量", slider.x, slider.y - 16);
-    ctx.textAlign = "right";
-    ctx.fillText(Math.round(audioSettings.volume * 100) + "%", slider.x + slider.w, slider.y - 16);
+    const drawRow = (row, volume, muted, key, color) => {
+      const { mute, slider } = row;
+      const muteControl = key + "Mute";
+      const muteHovered = hovered === muteControl;
+      ctx.fillStyle = "#9fd8ff";
+      ctx.font = "14px 'Segoe UI', sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(row.label, slider.x, slider.y - 16);
+      ctx.textAlign = "right";
+      ctx.fillText(Math.round(volume * 100) + "%", slider.x + slider.w, slider.y - 16);
 
-    ctx.beginPath();
-    ctx.arc(mute.x + mute.w / 2, mute.y + mute.h / 2, 20, 0, Math.PI * 2);
-    ctx.fillStyle = hovered === "mute" ? "rgba(77,208,255,0.28)" : "rgba(22,39,72,0.9)";
-    ctx.fill();
-    ctx.strokeStyle = hovered === "mute" ? "#9fd8ff" : "#46658e";
-    ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(mute.x + mute.w / 2, mute.y + mute.h / 2, 20, 0, Math.PI * 2);
+      ctx.fillStyle = muteHovered ? "rgba(77,208,255,0.28)" : "rgba(22,39,72,0.9)";
+      ctx.fill();
+      ctx.strokeStyle = muteHovered ? "#9fd8ff" : "#46658e";
+      ctx.lineWidth = 1;
+      ctx.stroke();
 
-    const ix = mute.x + mute.w / 2, iy = mute.y + mute.h / 2;
-    ctx.fillStyle = audioSettings.muted ? "#7f91ad" : "#dff7ff";
-    ctx.beginPath();
-    ctx.moveTo(ix - 11, iy - 4);
-    ctx.lineTo(ix - 5, iy - 4);
-    ctx.lineTo(ix + 3, iy - 11);
-    ctx.lineTo(ix + 3, iy + 11);
-    ctx.lineTo(ix - 5, iy + 4);
-    ctx.lineTo(ix - 11, iy + 4);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = ctx.fillStyle;
-    ctx.lineWidth = 2;
-    if (audioSettings.muted) {
+      const ix = mute.x + mute.w / 2, iy = mute.y + mute.h / 2;
+      ctx.fillStyle = muted ? "#7f91ad" : "#dff7ff";
       ctx.beginPath();
-      ctx.moveTo(ix + 7, iy - 8);
-      ctx.lineTo(ix + 16, iy + 8);
-      ctx.moveTo(ix + 16, iy - 8);
-      ctx.lineTo(ix + 7, iy + 8);
-      ctx.stroke();
-    } else {
-      ctx.beginPath();
-      ctx.arc(ix + 2, iy, 10, -0.68, 0.68);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(ix + 2, iy, 15, -0.62, 0.62);
-      ctx.stroke();
-    }
+      ctx.moveTo(ix - 11, iy - 4);
+      ctx.lineTo(ix - 5, iy - 4);
+      ctx.lineTo(ix + 3, iy - 11);
+      ctx.lineTo(ix + 3, iy + 11);
+      ctx.lineTo(ix - 5, iy + 4);
+      ctx.lineTo(ix - 11, iy + 4);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = ctx.fillStyle;
+      ctx.lineWidth = 2;
+      if (muted) {
+        ctx.beginPath();
+        ctx.moveTo(ix + 7, iy - 8);
+        ctx.lineTo(ix + 16, iy + 8);
+        ctx.moveTo(ix + 16, iy - 8);
+        ctx.lineTo(ix + 7, iy + 8);
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.arc(ix + 2, iy, 10, -0.68, 0.68);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(ix + 2, iy, 15, -0.62, 0.62);
+        ctx.stroke();
+      }
 
-    ctx.lineCap = "round";
-    ctx.lineWidth = 7;
-    ctx.strokeStyle = "rgba(50,75,110,0.95)";
-    ctx.beginPath();
-    ctx.moveTo(slider.x, slider.y);
-    ctx.lineTo(slider.x + slider.w, slider.y);
-    ctx.stroke();
-    ctx.strokeStyle = audioSettings.muted ? "#6b7c98" : "#4dd0ff";
-    ctx.beginPath();
-    ctx.moveTo(slider.x, slider.y);
-    ctx.lineTo(slider.x + slider.w * audioSettings.volume, slider.y);
-    ctx.stroke();
-    ctx.lineCap = "butt";
-    ctx.fillStyle = audioSettings.muted ? "#a9b7ca" : "#eaffff";
-    ctx.beginPath();
-    ctx.arc(slider.x + slider.w * audioSettings.volume, slider.y, 7, 0, Math.PI * 2);
-    ctx.fill();
+      ctx.lineCap = "round";
+      ctx.lineWidth = 7;
+      ctx.strokeStyle = "rgba(50,75,110,0.95)";
+      ctx.beginPath();
+      ctx.moveTo(slider.x, slider.y);
+      ctx.lineTo(slider.x + slider.w, slider.y);
+      ctx.stroke();
+      ctx.strokeStyle = muted ? "#6b7c98" : color;
+      ctx.beginPath();
+      ctx.moveTo(slider.x, slider.y);
+      ctx.lineTo(slider.x + slider.w * volume, slider.y);
+      ctx.stroke();
+      ctx.lineCap = "butt";
+      ctx.fillStyle = muted ? "#a9b7ca" : "#eaffff";
+      ctx.beginPath();
+      ctx.arc(slider.x + slider.w * volume, slider.y, 7, 0, Math.PI * 2);
+      ctx.fill();
+    };
+
+    drawRow(bgm, audioSettings.bgmVolume, audioSettings.bgmMuted, "bgm", "#c0a0ff");
+    drawRow(effects, audioSettings.effectsVolume, audioSettings.effectsMuted, "effects", "#4dd0ff");
     ctx.restore();
   }
 
@@ -1709,7 +1849,7 @@ class Game {
 
 // ---------- 输入 ----------
 const input = { left: false, right: false, up: false, down: false };
-let volumeSliderDragging = false;
+let volumeSliderDragging = null;
 
 function canvasPoint(e) {
   const rect = canvas.getBoundingClientRect();
@@ -1720,10 +1860,12 @@ function canvasPoint(e) {
 }
 
 function updateVolumeFromPointer(e) {
-  if (!game || !game.paused) return;
+  if (!game || !game.paused || !volumeSliderDragging) return;
   const point = canvasPoint(e);
-  const { slider } = game.pauseAudioLayout();
-  setAudioVolume((point.x - slider.x) / slider.w, true);
+  const row = game.pauseAudioLayout()[volumeSliderDragging];
+  const value = (point.x - row.slider.x) / row.slider.w;
+  if (volumeSliderDragging === "bgm") setBgmVolume(value, true);
+  else setEffectsVolume(value, true);
 }
 
 // 选择当前卡片（增益或道具，1/2/3 键与鼠标点击共用）
@@ -1755,7 +1897,10 @@ window.addEventListener("keydown", (e) => {
     case "Digit2": case "Numpad2": chooseCard(1); break;
     case "Digit3": case "Numpad3": chooseCard(2); break;
     case "KeyR":
-      if (game && game.waveState === "gameover") { game = new Game(); }
+      if (game && game.waveState === "gameover") {
+        game = new Game();
+        startBackgroundMusic();
+      }
       break;
   }
 });
@@ -1763,8 +1908,9 @@ canvas.addEventListener("pointerdown", (e) => {
   ensureAudio();
   if (!game || !game.paused) return;
   const point = canvasPoint(e);
-  if (game.pauseAudioControlAt(point.x, point.y) === "slider") {
-    volumeSliderDragging = true;
+  const control = game.pauseAudioControlAt(point.x, point.y);
+  if (control === "bgmSlider" || control === "effectsSlider") {
+    volumeSliderDragging = control === "bgmSlider" ? "bgm" : "effects";
     canvas.setPointerCapture?.(e.pointerId);
     updateVolumeFromPointer(e);
   }
@@ -1772,7 +1918,7 @@ canvas.addEventListener("pointerdown", (e) => {
 canvas.addEventListener("pointermove", (e) => {
   if (volumeSliderDragging) updateVolumeFromPointer(e);
 });
-window.addEventListener("pointerup", () => { volumeSliderDragging = false; });
+window.addEventListener("pointerup", () => { volumeSliderDragging = null; });
 window.addEventListener("keyup", (e) => {
   switch (e.code) {
     case "ArrowLeft": case "KeyA": input.left = false; break;
@@ -1795,13 +1941,19 @@ canvas.addEventListener("click", (e) => {
   if (!game) return;
   const { x: mx, y: my } = canvasPoint(e);
   const pauseControl = game.pauseAudioControlAt(mx, my);
-  if (pauseControl === "mute") {
-    toggleAudioMute();
+  if (pauseControl === "bgmMute") {
+    toggleBgmMute();
     return;
   }
-  if (pauseControl === "slider") {
-    const { slider } = game.pauseAudioLayout();
-    setAudioVolume((mx - slider.x) / slider.w, true);
+  if (pauseControl === "effectsMute") {
+    toggleEffectsMute();
+    return;
+  }
+  if (pauseControl === "bgmSlider" || pauseControl === "effectsSlider") {
+    const row = game.pauseAudioLayout()[pauseControl === "bgmSlider" ? "bgm" : "effects"];
+    const value = (mx - row.slider.x) / row.slider.w;
+    if (pauseControl === "bgmSlider") setBgmVolume(value, true);
+    else setEffectsVolume(value, true);
     return;
   }
   const i = game.cardAt(mx, my);
