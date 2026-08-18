@@ -606,13 +606,17 @@ class Enemy {
 class Boss {
   constructor() {
     this.x = W / 2;
-    this.y = 125;
+    this.targetY = 125;
+    this.y = -180;
+    this.entering = true;
+    this.entranceElapsed = 0;
+    this.entranceDuration = 2.4;
     this.maxHp = 1000;
     this.hp = this.maxHp;
     this.hitRadius = 205;
     this.phase = 1;
     this.time = 0;
-    this.attackCooldown = 1.8;
+    this.attackCooldown = 0.9;
     this.attack = null;
     this.attackIndex = 0;
     this.hitFlash = 0;
@@ -678,6 +682,27 @@ class Boss {
       return;
     }
 
+    if (this.entering) {
+      this.entranceElapsed += dt;
+      const progress = clamp(this.entranceElapsed / this.entranceDuration, 0, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      this.y = -180 + (this.targetY + 180) * eased;
+      if (Math.random() < dt * 18) {
+        for (const side of [-1, 1]) {
+          game.addParticles(this.x + side * 62, this.y - 92, this.phase === 3 ? "#ff596a" : "#65eaff", 1, 0.32);
+        }
+      }
+      if (progress >= 1) {
+        this.y = this.targetY;
+        this.entering = false;
+        this.attackCooldown = 0.9;
+        game.waveState = "boss";
+        game.screenShake = Math.max(game.screenShake, 0.42);
+        game.explosion(this.x, this.y + 62, this.phase === 3 ? "#ff596a" : "#65eaff", 0.72);
+      }
+      return;
+    }
+
     this.phase = this.healthRatio <= 0.33 ? 3 : this.healthRatio <= 0.66 ? 2 : 1;
 
     if (this.attack) this.updateAttack(dt, game);
@@ -706,7 +731,7 @@ class Boss {
       this.attack.targetY = game.player.y;
       this.attack.lines = this.crossLines(this.attack.targetX, this.attack.targetY, 0, 0, this.attack.beamWidth);
     }
-    if (type === "fan") this.attack.total = this.phase === 3 ? 18 : 14;
+    if (type === "fan") this.attack.total = this.phase === 3 ? 32 : 28;
     if (type === "fan") this.attack.rounds = 2;
     if (type === "radial") this.attack.rounds = 3;
     if (type === "parallel") this.attack.beams = 11;
@@ -791,7 +816,7 @@ class Boss {
     if (a.type === "delay") {
       if (!a.fired && a.elapsed >= 0.32) {
         a.fired = true;
-        for (let i = -1; i <= 1; i++) {
+        for (let i = -1; i <= 1; i += 2) {
           game.bossProjectiles.push({
             x: this.x + i * 105,
             y: this.y + 58,
@@ -864,8 +889,15 @@ class Boss {
     for (const projectile of game.bossProjectiles) {
       projectile.x += projectile.vx * dt;
       projectile.y += projectile.vy * dt;
-      if (projectile.y - projectile.startY >= projectile.explodeAfter || projectile.y > H + 20) {
+      const hitPlayer = Math.hypot(projectile.x - game.player.x, projectile.y - game.player.y) <= projectile.r + game.player.r;
+      const reachedDistance = projectile.y - projectile.startY >= projectile.explodeAfter || projectile.y > H + 20;
+      if (hitPlayer || reachedDistance) {
         projectile.dead = true;
+        if (hitPlayer) {
+          game.player.hit(20);
+          game.addParticles(projectile.x, projectile.y, projectile.color, 6, 0.7);
+          game.screenShake = Math.max(game.screenShake, 0.22);
+        }
         game.explosion(projectile.x, projectile.y, projectile.color, 0.65);
         const bulletCount = 25;
         for (let i = 0; i < bulletCount; i++) {
@@ -1193,7 +1225,7 @@ class Game {
     this.floatTexts = [];
     this.gold = 0;
     this.wave = 0;
-    this.waveState = "modeSelect"; // modeSelect | intermission | fighting | reward | shop | item | boss | bossVictory | gameover
+    this.waveState = "modeSelect"; // modeSelect | intermission | fighting | reward | shop | item | bossIntro | boss | bossVictory | gameover
     this.paused = false;
     this.intermissionTimer = 1.6;
     this.waveKills = 0; // 本波已击杀数
@@ -1223,7 +1255,7 @@ class Game {
   modeOptions() {
     return [
       { id: "campaign", key: "1", name: "普通战役", x: W / 2 - 220, y: H / 2 - 30, w: 200, h: 118 },
-      { id: "boss", key: "2", name: "星蚀母舰", x: W / 2 + 20, y: H / 2 - 30, w: 200, h: 118 },
+      { id: "boss", key: "2", name: "BOSS战", x: W / 2 + 20, y: H / 2 - 30, w: 200, h: 118 },
     ];
   }
 
@@ -1246,9 +1278,9 @@ class Game {
     this.player.y = H - 80;
     if (mode === "boss") {
       this.boss = new Boss();
-      this.waveState = "boss";
+      this.waveState = "bossIntro";
       this.player.laserCharges = this.player.maxLaserCharges;
-      this.player.invuln = 1.2;
+      this.player.invuln = 0;
     } else {
       this.waveState = "intermission";
       this.intermissionTimer = 1.6;
@@ -1350,6 +1382,11 @@ class Game {
     }
 
     if (this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "shop" || this.waveState === "item") return;
+
+    if (this.waveState === "bossIntro") {
+      this.boss.update(dt, this);
+      return;
+    }
 
     if (this.waveState !== "bossVictory") this.player.update(dt, input, this);
 
@@ -1941,7 +1978,7 @@ class Game {
 
   // 发射玩家激光（无前摇，消耗 1 次）
   firePlayerLaser() {
-    if (this.paused || this.waveState === "modeSelect" || this.waveState === "bossVictory" || this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "shop" || this.waveState === "item") return false;
+    if (this.paused || this.waveState === "modeSelect" || this.waveState === "bossIntro" || this.waveState === "bossVictory" || this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "shop" || this.waveState === "item") return false;
     if (this.player.laserCharges <= 0) return false;
     this.player.laserCharges--;
     this.playerLasers.push({ x: this.player.x, t: 0.35, damage: 20, hit: new Set() });
@@ -2132,7 +2169,7 @@ class Game {
     ctx.fillStyle = "#f4fbff";
     ctx.shadowColor = color;
     ctx.shadowBlur = 10;
-    ctx.fillText("星蚀母舰", W / 2, 27);
+    ctx.fillText("无畏级", W / 2, 27);
     ctx.shadowBlur = 0;
     ctx.fillStyle = "rgba(2,7,12,0.88)";
     ctx.fillRect(bar.x, bar.y, bar.w, bar.h);
@@ -2442,7 +2479,7 @@ class Game {
   drawHUD() {
     // 玩家机体完整度 HUD：核心图标 + 分段能量槽 + 数值读数。
     const ratio = clamp(this.player.hp / this.player.maxHp, 0, 1);
-    const panel = { x: 14, y: this.mode === "boss" ? 72 : 12, w: 252, h: 58 };
+    const panel = { x: 14, y: 12, w: 252, h: 58 };
     const core = { x: panel.x + 27, y: panel.y + 29 };
     const bar = { x: panel.x + 51, y: panel.y + 31, w: 174, h: 13 };
     const hpColor = ratio > 0.5 ? "#50e3c2" : ratio > 0.25 ? "#ffd166" : "#ff5e7a";
