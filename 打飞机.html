@@ -401,7 +401,10 @@ class Enemy {
       if (game.player && this.type !== "tank" && this.type !== "spinner" && this.type !== "elite") {
         this.y += this.speed * 0.35 * dt;
       }
-      if (this.y > H + 40) this.y = -40; // 循环
+      if (this.y > H + 40) {
+        if (game.waveState === "bossWarmup") this.gone = true;
+        else this.y = -40; // 普通波次循环
+      }
     }
     // 边界反弹（摇摆时不出界）
     if (this.x < this.r + 10) { this.x = this.r + 10; this.wobble = Math.PI - this.wobble; }
@@ -941,7 +944,7 @@ class Boss {
     game.enemyBullets = [];
     game.bossProjectiles = [];
     game.gold += 1000;
-    game.waveState = "bossVictory";
+    if (game.mode === "boss") game.waveState = "bossVictory";
     game.explosion(this.x, this.y, "#ff5065", 2.2);
     game.screenShake = 0.7;
   }
@@ -1240,12 +1243,14 @@ class Game {
     this.floatTexts = [];
     this.gold = 0;
     this.wave = 0;
-    this.waveState = "modeSelect"; // modeSelect | intermission | fighting | reward | shop | item | bossIntro | boss | bossVictory | gameover
+    this.waveState = "modeSelect"; // modeSelect | intermission | fighting | bossWarmup | reward | shop | item | bossIntro | boss | bossVictory | gameover
     this.paused = false;
     this.intermissionTimer = 1.6;
     this.waveKills = 0; // 本波已击杀数
     this.waveQuota = 0; // 本波所需击杀数（刷够即停止刷怪）
     this.spawnTimer = 0;
+    this.bossWarmupTotal = 0;
+    this.bossWarmupSpawned = 0;
     this.rewardOptions = null; // 增益选择卡片
     this.rewardHover = -1;
     this.choiceAnimation = null;
@@ -1306,6 +1311,12 @@ class Game {
   // 本波所需击杀数（配额）
   waveQuotaFor(n) { return 7 + n * 3; }
 
+  isBossWave(n = this.wave) { return n > 0 && n % 10 === 0; }
+
+  isCampaignBossState() {
+    return this.mode === "campaign" && ["bossWarmup", "bossIntro", "boss"].includes(this.waveState);
+  }
+
   // 随机生成一只敌人（波次越高越强、越容易出现高级敌人）
   randomEnemyItem() {
     const n = this.wave;
@@ -1349,6 +1360,68 @@ class Game {
     e.maxHp = Math.round(e.maxHp * mul);
     e.hp = e.maxHp;
     return e;
+  }
+
+  // BOSS 预热使用独立概率表，不改动普通战役各波次的刷新规则。
+  randomBossWarmupItem() {
+    const roll = Math.random();
+    let type;
+    if (roll < 0.16) type = "tank";
+    else if (roll < 0.32) type = "spinner";
+    else if (roll < 0.44) type = "elite";
+    else if (roll < 0.72) type = "grunt";
+    else type = "scout";
+    return { type, hpMul: 1 + this.wave * 0.15 };
+  }
+
+  startCampaignBossWave() {
+    this.boss = null;
+    this.bossProjectiles = [];
+    this.enemyBullets = [];
+    this.playerLasers = [];
+    this.homingBullets = [];
+    this.bomb = null;
+    this.waveKills = 0;
+    this.waveQuota = 0;
+    this.bossWarmupTotal = randInt(15, 30);
+    this.bossWarmupSpawned = 0;
+    this.spawnTimer = 0.25;
+    this.waveState = "bossWarmup";
+    this.floatTexts.push(new FloatText(W / 2, H / 2, "BOSS关预热", "#ff9f66", 26));
+  }
+
+  startCampaignBossIntro() {
+    if (this.waveState !== "bossWarmup" || this.enemies.length > 0) return;
+    this.boss = new Boss();
+    this.bossProjectiles = [];
+    this.enemyBullets = [];
+    this.playerLasers = [];
+    this.homingBullets = [];
+    this.bomb = null;
+    this.waveState = "bossIntro";
+    this.player.invuln = Math.max(this.player.invuln, 0.4);
+  }
+
+  completeCampaignBoss() {
+    if (this.mode !== "campaign" || !this.boss?.defeated) return;
+    this.boss = null;
+    this.bossProjectiles = [];
+    this.enemyBullets = [];
+    this.playerLasers = [];
+    this.homingBullets = [];
+    this.bomb = null;
+    this.player.hp = this.player.maxHp;
+    this.player.invuln = 0.5;
+    this.item = null;
+    this.player.shield = 0;
+    this.trackTimer = 0;
+    this.rewardOptions = [
+      { id: "hp",    name: "生命 +5",  icon: "♥" },
+      { id: "speed", name: "攻速 +5%", icon: "⚡" },
+      { id: "laser", name: "激光补满", icon: "◉" },
+    ];
+    this.rewardHover = -1;
+    this.waveState = "reward";
   }
 
   spawnEnemyBullet(x, y, player) {
@@ -1398,17 +1471,15 @@ class Game {
 
     if (this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "shop" || this.waveState === "item") return;
 
-    if (this.waveState === "bossIntro") {
-      this.boss.update(dt, this);
-      return;
-    }
-
     if (this.waveState !== "bossVictory") this.player.update(dt, input, this);
 
-    const bossMode = this.mode === "boss";
-    if (bossMode && this.boss) {
+    const bossActive = !!this.boss && (this.waveState === "bossIntro" || this.waveState === "boss");
+    if (bossActive && this.boss) {
       this.boss.update(dt, this);
-      if (!this.boss.defeated && this.boss.collidesCircle(this.player.x, this.player.y, this.player.r)) {
+      if (this.mode === "campaign" && this.waveState === "boss" && this.boss.defeated && this.boss.deathTimer >= 1.8) {
+        this.completeCampaignBoss();
+      }
+      if (this.boss && !this.boss.entering && !this.boss.defeated && this.boss.collidesCircle(this.player.x, this.player.y, this.player.r)) {
         this.player.hp = 0;
         this.gameOver();
         return;
@@ -1420,16 +1491,30 @@ class Game {
     }
 
     // ---- 波次流程：持续刷怪，直到玩家刷够本波配额 ----
-    if (!bossMode && this.waveState === "intermission") {
+    if (this.mode === "campaign" && this.waveState === "intermission") {
       this.intermissionTimer -= dt;
       if (this.intermissionTimer <= 0) {
         this.wave++;
         this.waveKills = 0;
-        this.waveQuota = this.waveQuotaFor(this.wave);
-        this.spawnTimer = 0.3;
-        this.waveState = "fighting";
+        if (this.isBossWave()) {
+          this.startCampaignBossWave();
+        } else {
+          this.waveQuota = this.waveQuotaFor(this.wave);
+          this.spawnTimer = 0.3;
+          this.waveState = "fighting";
+        }
       }
-    } else if (!bossMode && this.waveState === "fighting") {
+    } else if (this.mode === "campaign" && this.waveState === "bossWarmup") {
+      this.spawnTimer -= dt;
+      if (this.bossWarmupSpawned < this.bossWarmupTotal && this.spawnTimer <= 0 && this.enemies.length < MAX_ALIVE_ENEMIES) {
+        this.enemies.push(this.spawnEnemy(this.randomBossWarmupItem()));
+        this.bossWarmupSpawned++;
+        this.spawnTimer = rand(0.25, 0.5);
+      }
+      if (this.bossWarmupSpawned >= this.bossWarmupTotal && this.enemies.length === 0) {
+        this.startCampaignBossIntro();
+      }
+    } else if (this.mode === "campaign" && this.waveState === "fighting") {
       // 击杀数未达标且场上敌人未满时，持续刷怪
       this.spawnTimer -= dt;
       if (this.spawnTimer <= 0 && this.enemies.length < MAX_ALIVE_ENEMIES) {
@@ -1464,7 +1549,7 @@ class Game {
           break;
         }
       }
-      if (!b.dead && bossMode && this.boss && !this.boss.defeated) {
+      if (!b.dead && bossActive && this.boss && !this.boss.entering && !this.boss.defeated) {
         const impact = this.boss.segmentImpact(b.px, b.py, b.x, b.y, b.r);
         if (impact) {
           b.dead = true;
@@ -1516,7 +1601,7 @@ class Game {
     }
 
     // ---- 自动追踪道具：基础 2 发/秒，商店强化可永久叠加 ----
-    const bossTargetAvailable = bossMode && this.boss && !this.boss.defeated;
+    const bossTargetAvailable = bossActive && this.boss && !this.boss.entering && !this.boss.defeated;
     if (this.item && this.item.id === "track" && (this.enemies.length > 0 || bossTargetAvailable)) {
       this.trackTimer -= dt;
       if (this.trackTimer <= 0) {
@@ -1583,7 +1668,7 @@ class Game {
           break;
         }
       }
-      if (!collided && bossMode && this.boss && !this.boss.defeated) {
+      if (!collided && bossActive && this.boss && !this.boss.entering && !this.boss.defeated) {
         collided = distToSegment(this.boss.x, this.boss.y, this.bomb.x, previousY, this.bomb.x, this.bomb.y) <= this.bomb.r + this.boss.hitRadius;
       }
       const reachedTop = this.bomb.y <= this.bomb.r;
@@ -1600,13 +1685,13 @@ class Game {
             if (killed) this.killEnemy(e);
           }
         }
-        if (bossMode && this.boss && !this.boss.defeated && Math.hypot(this.boss.x - bx, this.boss.y - by) < R + this.boss.hitRadius) {
+        if (bossActive && this.boss && !this.boss.entering && !this.boss.defeated && Math.hypot(this.boss.x - bx, this.boss.y - by) < R + this.boss.hitRadius) {
           this.boss.hit(35, this, bx, by);
         }
       }
     }
 
-    if (bossMode && this.boss && !this.boss.defeated) {
+    if (bossActive && this.boss && !this.boss.entering && !this.boss.defeated) {
       for (const l of this.playerLasers) {
         if (l.bossHit) continue;
         const impact = this.boss.segmentImpact(l.x, this.player.y, l.x, -10, PLAYER_LASER_HIT_RADIUS);
@@ -1618,7 +1703,7 @@ class Game {
     }
 
     // ---- 敌人更新 ----
-    if (!bossMode) {
+    if (!bossActive) {
       for (const e of this.enemies) e.update(dt, this);
       this.enemies = this.enemies.filter(e => !e.gone); // 侦察机飞出屏幕后移除
     }
@@ -1637,7 +1722,7 @@ class Game {
     if (idx === -1) return;
     this.enemies.splice(idx, 1);
     this.gold += e.gold;
-    if (countForWave) this.waveKills++;
+    if (countForWave && this.waveState === "fighting") this.waveKills++;
     if (countForWave) playKillSound();
     this.addParticles(e.x, e.y, ENEMY_TYPES[e.type].color, 22, 1.4);
     this.addParticles(e.x, e.y, "#ffffff", 8, 1);
@@ -1759,7 +1844,7 @@ class Game {
 
   // 发射炸弹（X 键，仅本回合有炸弹道具时可用）
   launchBomb() {
-    if (this.waveState !== "fighting" && this.waveState !== "boss") return false;
+    if (this.waveState !== "fighting" && this.waveState !== "bossIntro" && this.waveState !== "boss") return false;
     if (!this.item || this.item.id !== "bomb" || this.item.count <= 0) return false;
     this.item.count--;
     // 直线向上飞行，接触敌人或抵达屏幕顶部时爆炸
@@ -1993,7 +2078,7 @@ class Game {
 
   // 发射玩家激光（无前摇，消耗 1 次）
   firePlayerLaser() {
-    if (this.paused || this.waveState === "modeSelect" || this.waveState === "bossIntro" || this.waveState === "bossVictory" || this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "shop" || this.waveState === "item") return false;
+    if (this.paused || this.waveState === "modeSelect" || this.waveState === "bossVictory" || this.waveState === "gameover" || this.waveState === "reward" || this.waveState === "shop" || this.waveState === "item") return false;
     if (this.player.laserCharges <= 0) return false;
     this.player.laserCharges--;
     this.playerLasers.push({ x: this.player.x, t: 0.35, damage: 20, hit: new Set() });
@@ -2322,7 +2407,7 @@ class Game {
       ctx.fillStyle = "#9fd8ff";
       ctx.shadowColor = "#4dd0ff";
       ctx.shadowBlur = 18;
-      ctx.fillText("第 " + next + " 波来袭", W / 2, H / 2 - 20);
+      ctx.fillText(this.isBossWave(next) ? "BOSS关准备中" : "第 " + next + " 波来袭", W / 2, H / 2 - 20);
       ctx.shadowBlur = 0;
       ctx.globalAlpha = 1;
     }
@@ -2344,7 +2429,7 @@ class Game {
       ctx.font = "bold 16px 'Segoe UI', sans-serif";
       ctx.fillStyle = "#9fd8ff";
       if (this.waveState === "reward") {
-        ctx.fillText("第 " + this.wave + " 波通关！", W / 2, H / 2 - 205);
+        ctx.fillText(this.isBossWave(this.wave) ? "BOSS关通关！" : "第 " + this.wave + " 波通关！", W / 2, H / 2 - 205);
       } else if (isShop) {
         ctx.fillStyle = "#ffd43b";
         ctx.fillText("金币 " + this.gold.toLocaleString("zh-CN") + "  ·  每次限购一件", W / 2, H / 2 - 205);
@@ -2561,8 +2646,18 @@ class Game {
     }
     ctx.restore();
 
-    if (this.mode === "boss") {
-      this.drawBossHUD();
+    if (this.mode === "boss" || this.isCampaignBossState()) {
+      if (this.boss) {
+        this.drawBossHUD();
+      } else {
+        ctx.textAlign = "right";
+        ctx.font = "bold 20px 'Segoe UI', sans-serif";
+        ctx.fillStyle = "#ff9f66";
+        ctx.fillText("BOSS关", W - 16, 32);
+        ctx.font = "15px 'Segoe UI', sans-serif";
+        ctx.fillStyle = "#ffcf9f";
+        ctx.fillText("预热阶段", W - 16, 54);
+      }
     } else {
       // 金币 & 波次（右上）
       ctx.textAlign = "right";
