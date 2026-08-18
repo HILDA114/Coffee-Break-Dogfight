@@ -293,7 +293,7 @@ class Particle {
   }
 }
 
-// ---------- 漂浮文字（伤害数字等） ----------
+// ---------- 漂浮文字（金币、状态提示等） ----------
 class FloatText {
   constructor(x, y, text, color, size = 14) {
     this.x = x; this.y = y;
@@ -606,7 +606,7 @@ class Enemy {
 class Boss {
   constructor() {
     this.x = W / 2;
-    this.y = 165;
+    this.y = 125;
     this.maxHp = 1000;
     this.hp = this.maxHp;
     this.hitRadius = 205;
@@ -623,14 +623,29 @@ class Boss {
 
   get healthRatio() { return clamp(this.hp / this.maxHp, 0, 1); }
 
+  containsPoint(x, y, padding = 0) {
+    const localX = x - this.x;
+    const localY = y - this.y;
+    const wingHit = (localX / (360 + padding)) ** 2 + (localY / (118 + padding)) ** 2 <= 1;
+    const coreHit = (localX / (112 + padding)) ** 2 + (localY / (170 + padding)) ** 2 <= 1;
+    return wingHit || coreHit;
+  }
+
+  collidesCircle(x, y, radius = 0) {
+    const visualScale = 0.66;
+    const localX = x - this.x;
+    const localY = y - this.y;
+    const wingHit = (localX / (470 * visualScale + radius)) ** 2 + (localY / (116 * visualScale + radius)) ** 2 <= 1;
+    const hullHit = (localX / (136 * visualScale + radius)) ** 2 + (localY / (184 * visualScale + radius)) ** 2 <= 1;
+    return wingHit || hullHit;
+  }
+
   hitsSegment(ax, ay, bx, by, padding = 0) {
     for (let i = 0; i <= 6; i++) {
       const t = i / 6;
-      const x = ax + (bx - ax) * t - this.x;
-      const y = ay + (by - ay) * t - this.y;
-      const wingHit = (x / (360 + padding)) ** 2 + (y / (118 + padding)) ** 2 <= 1;
-      const coreHit = (x / (112 + padding)) ** 2 + (y / (170 + padding)) ** 2 <= 1;
-      if (wingHit || coreHit) return true;
+      const x = ax + (bx - ax) * t;
+      const y = ay + (by - ay) * t;
+      if (this.containsPoint(x, y, padding)) return true;
     }
     return false;
   }
@@ -646,9 +661,6 @@ class Boss {
       return;
     }
 
-    // 大型舰体只做缓慢横向巡航，避免左右晃动像普通敌机。
-    const targetX = W / 2 + Math.sin(this.time * 0.42) * Math.min(105, W * 0.13);
-    this.x += (targetX - this.x) * Math.min(1, dt * 1.35);
     this.phase = this.healthRatio <= 0.33 ? 3 : this.healthRatio <= 0.66 ? 2 : 1;
 
     if (this.attack) this.updateAttack(dt, game);
@@ -668,8 +680,18 @@ class Boss {
     const type = phasePatterns[this.phase][this.attackIndex % phasePatterns[this.phase].length];
     this.attackIndex++;
     this.attack = { type, elapsed: 0, fired: false, shots: 0, nextShot: 0, activeUntil: 0, lines: [] };
-    if (type === "cross") this.attack.salvos = this.phase === 3 ? 2 : 1;
+    if (type === "cross") {
+      this.attack.warningDuration = 0.45;
+      this.attack.sweepDuration = this.phase === 3 ? 1.5 : 1.8;
+      this.attack.sweepAngle = Math.PI * 35 / 180;
+      this.attack.beamWidth = this.phase === 3 ? 12 : 10;
+      this.attack.targetX = game.player.x;
+      this.attack.targetY = game.player.y;
+      this.attack.lines = this.crossLines(this.attack.targetX, this.attack.targetY, 0, 0, this.attack.beamWidth);
+    }
     if (type === "fan") this.attack.total = this.phase === 3 ? 18 : 14;
+    if (type === "fan") this.attack.rounds = 2;
+    if (type === "radial") this.attack.rounds = 3;
     if (type === "parallel") this.attack.beams = 11;
     game.addParticles(this.x, this.y + 18, this.phase === 3 ? "#ff596a" : "#65eaff", 8, 0.35);
   }
@@ -679,16 +701,19 @@ class Boss {
     a.elapsed += dt;
 
     if (a.type === "cross") {
-      const firstShot = 0.82;
-      const interval = 0.76;
-      while (a.fired < a.salvos && a.elapsed >= firstShot + a.fired * interval) {
-        a.lines = this.crossLines();
-        a.activeUntil = a.elapsed + 0.42;
-        a.fired++;
-        for (const line of a.lines) game.addParticles(line.ax, line.ay, "#ff6359", 4, 0.2);
+      const sweepProgress = clamp((a.elapsed - a.warningDuration) / a.sweepDuration, 0, 1);
+      const leftRotation = sweepProgress * a.sweepAngle;
+      const rightRotation = -sweepProgress * a.sweepAngle;
+      a.lines = this.crossLines(a.targetX, a.targetY, leftRotation, rightRotation, a.beamWidth);
+      if (a.elapsed >= a.warningDuration) {
+        if (!a.fired) {
+          a.fired = true;
+          game.screenShake = Math.max(game.screenShake, 0.16);
+          for (const line of a.lines) game.addParticles(line.ax, line.ay, "#ff6359", 4, 0.2);
+        }
+        this.damageFromLines(a.lines, game);
       }
-      if (a.activeUntil > a.elapsed) this.damageFromLines(a.lines, game);
-      if (a.elapsed > firstShot + a.salvos * interval + 0.35) this.finishAttack();
+      if (sweepProgress >= 1) this.finishAttack();
       return;
     }
 
@@ -705,29 +730,33 @@ class Boss {
     }
 
     if (a.type === "radial") {
-      if (a.elapsed >= 0.3 && a.shots < 25) {
-        if (!a.fired) {
-          a.fired = true;
-          a.nextShot = a.elapsed;
-          a.angle = -Math.PI / 2 + rand(-0.15, 0.15);
-        }
-        while (a.shots < 25 && a.elapsed >= a.nextShot) {
-          const angle = a.angle + a.shots * Math.PI * 2 / 25;
+      const firstRound = 0.3;
+      const roundInterval = 0.48;
+      const bulletCount = 30;
+      while (a.shots < a.rounds && a.elapsed >= firstRound + a.shots * roundInterval) {
+        const startAngle = -Math.PI / 2 + rand(-0.15, 0.15) + a.shots * Math.PI / bulletCount;
+        for (let i = 0; i < bulletCount; i++) {
+          const angle = startAngle + i * Math.PI * 2 / bulletCount;
           this.spawnBullet(game, this.x, this.y + 28, angle, 148, 5, "#65eaff", 4);
-          a.shots++;
-          a.nextShot += 0.028;
         }
+        a.shots++;
       }
-      if (a.shots >= 25 && a.elapsed > 1.25) this.finishAttack();
+      if (a.shots >= a.rounds && a.elapsed > firstRound + (a.rounds - 1) * roundInterval + 0.5) this.finishAttack();
       return;
     }
 
     if (a.type === "fan") {
-      if (a.elapsed >= 0.24 && a.shots < a.total) {
-        if (!a.fired) { a.fired = true; a.nextShot = a.elapsed; }
-        while (a.shots < a.total && a.elapsed >= a.nextShot) {
-          const side = a.shots % 2 === 0 ? -1 : 1;
-          const index = Math.floor(a.shots / 2);
+      const firstShot = 0.24;
+      const shotInterval = 0.075;
+      const roundGap = 0.38;
+      const totalShots = a.total * a.rounds;
+      while (a.shots < totalShots) {
+        const round = Math.floor(a.shots / a.total);
+        const shotInRound = a.shots % a.total;
+        const scheduledAt = firstShot + round * (a.total * shotInterval + roundGap) + shotInRound * shotInterval;
+        if (a.elapsed < scheduledAt) break;
+          const side = shotInRound % 2 === 0 ? -1 : 1;
+          const index = Math.floor(shotInRound / 2);
           const countPerSide = a.total / 2;
           const spread = 0.88;
           const angle = side === -1
@@ -736,10 +765,9 @@ class Boss {
           const originX = this.x + side * 126;
           this.spawnBullet(game, originX, this.y + 34, angle, 164, 5, "#d9a5ff", 4);
           a.shots++;
-          a.nextShot += 0.075;
-        }
       }
-      if (a.shots >= a.total && a.elapsed > 1.35) this.finishAttack();
+      const lastShotAt = firstShot + (a.rounds - 1) * (a.total * shotInterval + roundGap) + (a.total - 1) * shotInterval;
+      if (a.shots >= totalShots && a.elapsed > lastShotAt + 0.35) this.finishAttack();
       return;
     }
 
@@ -754,6 +782,8 @@ class Boss {
             vy: 102,
             r: 11,
             color: "#ff9b66",
+            startY: this.y + 58,
+            explodeAfter: 300,
             dead: false,
           });
         }
@@ -767,14 +797,25 @@ class Boss {
     this.attackCooldown = this.phase === 3 ? rand(0.75, 1.15) : rand(1.05, 1.55);
   }
 
-  crossLines() {
-    const y = this.y + 35;
-    const leftX = this.x - 134;
-    const rightX = this.x + 134;
-    return [
-      { ax: leftX, ay: y, bx: this.x + 355, by: H + 40, width: 8 },
-      { ax: rightX, ay: y, bx: this.x - 355, by: H + 40, width: 8 },
-    ];
+  crossLines(targetX, targetY, leftRotation = 0, rightRotation = 0, width = 10) {
+    const visualScale = 0.66;
+    const turretY = this.y + 26 * visualScale;
+    const barrelLength = 62 * visualScale;
+    const length = Math.hypot(W, H) * 1.35;
+    const makeLine = (side, rotation) => {
+      const turretX = this.x + side * 132 * visualScale;
+      const angle = Math.atan2(targetY - turretY, targetX - turretX) + rotation;
+      const ax = turretX + Math.cos(angle) * barrelLength;
+      const ay = turretY + Math.sin(angle) * barrelLength;
+      return {
+        ax,
+        ay,
+        bx: ax + Math.cos(angle) * length,
+        by: ay + Math.sin(angle) * length,
+        width,
+      };
+    };
+    return [makeLine(-1, leftRotation), makeLine(1, rightRotation)];
   }
 
   parallelLines() {
@@ -806,12 +847,13 @@ class Boss {
     for (const projectile of game.bossProjectiles) {
       projectile.x += projectile.vx * dt;
       projectile.y += projectile.vy * dt;
-      if (projectile.y >= game.player.y - 105 || projectile.y > H + 20) {
+      if (projectile.y - projectile.startY >= projectile.explodeAfter || projectile.y > H + 20) {
         projectile.dead = true;
         game.explosion(projectile.x, projectile.y, projectile.color, 0.65);
-        for (let i = 0; i < 8; i++) {
-          const angle = i * Math.PI * 2 / 8 + this.time * 0.25;
-          this.spawnBullet(game, projectile.x, projectile.y, angle, 126, 6, "#ffbc7c", 4);
+        const bulletCount = 25;
+        for (let i = 0; i < bulletCount; i++) {
+          const angle = i * Math.PI * 2 / bulletCount + this.time * 0.25;
+          this.spawnBullet(game, projectile.x, projectile.y, angle, 126, 5, "#ffbc7c", 4);
         }
       }
     }
@@ -855,24 +897,16 @@ class Boss {
     this.drawWing(-1);
     this.drawWing(1);
     this.drawHull();
-    this.drawTurret(-132, 26, -1);
-    this.drawTurret(132, 26, 1);
+    const crossLines = this.attack?.type === "cross" ? this.attack.lines : null;
+    const leftAim = crossLines?.[0]
+      ? Math.atan2(crossLines[0].by - crossLines[0].ay, crossLines[0].bx - crossLines[0].ax) - Math.PI / 2
+      : null;
+    const rightAim = crossLines?.[1]
+      ? Math.atan2(crossLines[1].by - crossLines[1].ay, crossLines[1].bx - crossLines[1].ax) - Math.PI / 2
+      : null;
+    this.drawTurret(-132, 26, -1, leftAim);
+    this.drawTurret(132, 26, 1, rightAim);
 
-    if (this.phase === 2) {
-      ctx.save();
-      ctx.globalCompositeOperation = "lighter";
-      ctx.strokeStyle = "rgba(72,220,255,0.58)";
-      ctx.shadowColor = "#4cdfff";
-      ctx.shadowBlur = 16;
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.ellipse(0, 12, 530, 235, 0, Math.PI * 0.08, Math.PI * 0.92);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.ellipse(0, 12, 530, 235, 0, Math.PI * 1.08, Math.PI * 1.92);
-      ctx.stroke();
-      ctx.restore();
-    }
     ctx.restore();
   }
 
@@ -880,10 +914,8 @@ class Boss {
     if (!this.attack) return;
     const a = this.attack;
     if (a.type === "cross") {
-      if (a.elapsed < 0.82 || a.activeUntil > a.elapsed) {
-        const lines = a.lines.length ? a.lines : this.crossLines();
-        for (const line of lines) this.drawBeam(line, a.activeUntil > a.elapsed);
-      }
+      const active = a.elapsed >= a.warningDuration;
+      for (const line of a.lines) this.drawBeam(line, active);
     } else if (a.type === "parallel") {
       const lines = a.lines.length ? a.lines : this.parallelLines();
       if (a.elapsed < 0.95 || a.activeUntil > a.elapsed) {
@@ -993,8 +1025,8 @@ class Boss {
     }
   }
 
-  drawTurret(x, y, side) {
-    ctx.save(); ctx.translate(x, y); ctx.rotate(Math.sin(this.time * 0.7 + side) * 0.18);
+  drawTurret(x, y, side, aimAngle = null) {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(aimAngle ?? Math.sin(this.time * 0.7 + side) * 0.18);
     ctx.fillStyle = "#0a141b"; ctx.strokeStyle = "#718b96"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 38, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     const fill = ctx.createLinearGradient(-25, -25, 25, 30); fill.addColorStop(0, "#596f7a"); fill.addColorStop(0.5, "#1c2d36"); fill.addColorStop(1, "#0b151d");
     ctx.fillStyle = fill; ctx.beginPath(); ctx.moveTo(-27, -16); ctx.lineTo(0, -31); ctx.lineTo(27, -16); ctx.lineTo(24, 21); ctx.lineTo(-24, 21); ctx.closePath(); ctx.fill();
@@ -1307,6 +1339,11 @@ class Game {
     const bossMode = this.mode === "boss";
     if (bossMode && this.boss) {
       this.boss.update(dt, this);
+      if (!this.boss.defeated && this.boss.collidesCircle(this.player.x, this.player.y, this.player.r)) {
+        this.player.hp = 0;
+        this.gameOver();
+        return;
+      }
       if (this.player.hp <= 0) {
         this.gameOver();
         return;
@@ -1354,7 +1391,6 @@ class Game {
           b.dead = true;
           const killed = e.hit(b.damage);
           this.addParticles(b.x, b.y, b.color, 4, 0.6);
-          this.floatTexts.push(new FloatText(e.x + rand(-8, 8), e.y - e.r - 18, "-" + b.damage, "#ffd43b", 12));
           if (killed) this.killEnemy(e);
           break;
         }
@@ -1363,7 +1399,6 @@ class Game {
         b.dead = true;
         this.boss.hit(b.damage, this, b.x, b.y);
         this.addParticles(b.x, b.y, b.color, 4, 0.6);
-        this.floatTexts.push(new FloatText(b.x, b.y - 18, "-" + b.damage, "#ffd43b", 12));
       }
     }
     this.bullets = this.bullets.filter(b => !b.dead);
@@ -1403,7 +1438,6 @@ class Game {
           l.hit.add(e);
           const killed = e.hit(l.damage);
           this.addParticles(e.x, e.y, "#7ef0ff", 6, 0.8);
-          this.floatTexts.push(new FloatText(e.x, e.y - e.r - 18, "-" + l.damage, "#ffd43b", 12));
           if (killed) this.killEnemy(e);
         }
       }
@@ -1484,13 +1518,11 @@ class Game {
         for (const e of [...this.enemies]) {
           if (Math.hypot(e.x - bx, e.y - by) < R + e.r) {
             const killed = e.hit(35);
-            this.floatTexts.push(new FloatText(e.x, e.y - e.r - 18, "-35", "#ffd43b", 13));
             if (killed) this.killEnemy(e);
           }
         }
         if (bossMode && this.boss && !this.boss.defeated && Math.hypot(this.boss.x - bx, this.boss.y - by) < R + this.boss.hitRadius) {
           this.boss.hit(35, this, bx, by);
-          this.floatTexts.push(new FloatText(bx, by - 26, "-35", "#ffd43b", 13));
         }
       }
     }
@@ -1501,7 +1533,6 @@ class Game {
         l.bossHit = true;
         this.boss.hit(l.damage, this, l.x, this.boss.y);
         this.addParticles(l.x, this.boss.y, "#7ef0ff", 10, 0.8);
-        this.floatTexts.push(new FloatText(l.x, this.boss.y - 80, "-" + l.damage, "#ffd43b", 13));
       }
     }
 
