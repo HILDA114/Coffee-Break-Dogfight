@@ -623,31 +623,48 @@ class Boss {
 
   get healthRatio() { return clamp(this.hp / this.maxHp, 0, 1); }
 
+  hitEllipses(padding = 0) {
+    const visualScale = 0.66;
+    return [
+      { rx: 470 * visualScale + padding, ry: 116 * visualScale + padding },
+      { rx: 136 * visualScale + padding, ry: 184 * visualScale + padding },
+    ];
+  }
+
   containsPoint(x, y, padding = 0) {
     const localX = x - this.x;
     const localY = y - this.y;
-    const wingHit = (localX / (360 + padding)) ** 2 + (localY / (118 + padding)) ** 2 <= 1;
-    const coreHit = (localX / (112 + padding)) ** 2 + (localY / (170 + padding)) ** 2 <= 1;
-    return wingHit || coreHit;
+    return this.hitEllipses(padding).some(({ rx, ry }) => (localX / rx) ** 2 + (localY / ry) ** 2 <= 1);
   }
 
   collidesCircle(x, y, radius = 0) {
-    const visualScale = 0.66;
-    const localX = x - this.x;
-    const localY = y - this.y;
-    const wingHit = (localX / (470 * visualScale + radius)) ** 2 + (localY / (116 * visualScale + radius)) ** 2 <= 1;
-    const hullHit = (localX / (136 * visualScale + radius)) ** 2 + (localY / (184 * visualScale + radius)) ** 2 <= 1;
-    return wingHit || hullHit;
+    return this.containsPoint(x, y, radius);
   }
 
-  hitsSegment(ax, ay, bx, by, padding = 0) {
-    for (let i = 0; i <= 6; i++) {
-      const t = i / 6;
-      const x = ax + (bx - ax) * t;
-      const y = ay + (by - ay) * t;
-      if (this.containsPoint(x, y, padding)) return true;
+  segmentImpact(ax, ay, bx, by, padding = 0) {
+    const startX = ax - this.x;
+    const startY = ay - this.y;
+    const dx = bx - ax;
+    const dy = by - ay;
+    let firstT = Infinity;
+
+    for (const { rx, ry } of this.hitEllipses(padding)) {
+      const c = (startX / rx) ** 2 + (startY / ry) ** 2 - 1;
+      if (c <= 0) {
+        firstT = 0;
+        continue;
+      }
+      const a = (dx / rx) ** 2 + (dy / ry) ** 2;
+      if (a <= Number.EPSILON) continue;
+      const b = 2 * (startX * dx / (rx * rx) + startY * dy / (ry * ry));
+      const discriminant = b * b - 4 * a * c;
+      if (discriminant < 0) continue;
+      const t = (-b - Math.sqrt(discriminant)) / (2 * a);
+      if (t >= 0 && t <= 1) firstT = Math.min(firstT, t);
     }
-    return false;
+
+    if (!Number.isFinite(firstT)) return null;
+    return { x: ax + dx * firstT, y: ay + dy * firstT, t: firstT };
   }
 
   update(dt, game) {
@@ -1395,10 +1412,13 @@ class Game {
           break;
         }
       }
-      if (!b.dead && bossMode && this.boss && !this.boss.defeated && this.boss.hitsSegment(b.px, b.py, b.x, b.y, b.r)) {
-        b.dead = true;
-        this.boss.hit(b.damage, this, b.x, b.y);
-        this.addParticles(b.x, b.y, b.color, 4, 0.6);
+      if (!b.dead && bossMode && this.boss && !this.boss.defeated) {
+        const impact = this.boss.segmentImpact(b.px, b.py, b.x, b.y, b.r);
+        if (impact) {
+          b.dead = true;
+          this.boss.hit(b.damage, this, impact.x, impact.y);
+          this.addParticles(impact.x, impact.y, b.color, 4, 0.6);
+        }
       }
     }
     this.bullets = this.bullets.filter(b => !b.dead);
@@ -1470,17 +1490,24 @@ class Game {
       const targetIsBoss = hb.target && hb.target === this.boss;
       const targetActive = hb.target && !hb.target.gone && (this.enemies.includes(hb.target) || (targetIsBoss && !this.boss.defeated));
       if (targetActive) {
+        const previousX = hb.x;
+        const previousY = hb.y;
         const dx = hb.target.x - hb.x, dy = hb.target.y - hb.y;
         const len = Math.hypot(dx, dy) || 1;
         hb.vx = (dx / len) * hb.speed;
         hb.vy = (dy / len) * hb.speed;
         hb.x += hb.vx * dt;
         hb.y += hb.vy * dt;
-        const targetRadius = targetIsBoss ? this.boss.hitRadius : hb.target.r;
-        if (Math.hypot(hb.target.x - hb.x, hb.target.y - hb.y) < targetRadius + 5) {
+        const bossImpact = targetIsBoss ? this.boss.segmentImpact(previousX, previousY, hb.x, hb.y, 5) : null;
+        const hitTarget = targetIsBoss
+          ? bossImpact
+          : Math.hypot(hb.target.x - hb.x, hb.target.y - hb.y) < hb.target.r + 5;
+        if (hitTarget) {
           hb.dead = true;
-          const killed = targetIsBoss ? hb.target.hit(hb.damage, this, hb.x, hb.y) : hb.target.hit(hb.damage);
-          this.addParticles(hb.x, hb.y, "#ffe066", 5, 0.6);
+          const impactX = bossImpact?.x ?? hb.x;
+          const impactY = bossImpact?.y ?? hb.y;
+          const killed = targetIsBoss ? hb.target.hit(hb.damage, this, impactX, impactY) : hb.target.hit(hb.damage);
+          this.addParticles(impactX, impactY, "#ffe066", 5, 0.6);
           if (killed && !targetIsBoss) this.killEnemy(hb.target);
         }
       } else {
@@ -1529,10 +1556,12 @@ class Game {
 
     if (bossMode && this.boss && !this.boss.defeated) {
       for (const l of this.playerLasers) {
-        if (l.bossHit || Math.abs(this.boss.x - l.x) >= 360) continue;
+        if (l.bossHit) continue;
+        const impact = this.boss.segmentImpact(l.x, this.player.y, l.x, -10, PLAYER_LASER_HIT_RADIUS);
+        if (!impact) continue;
         l.bossHit = true;
-        this.boss.hit(l.damage, this, l.x, this.boss.y);
-        this.addParticles(l.x, this.boss.y, "#7ef0ff", 10, 0.8);
+        this.boss.hit(l.damage, this, impact.x, impact.y);
+        this.addParticles(impact.x, impact.y, "#7ef0ff", 10, 0.8);
       }
     }
 
