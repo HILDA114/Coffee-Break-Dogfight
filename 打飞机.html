@@ -616,7 +616,7 @@ class Boss {
     this.hitRadius = 205;
     this.phase = 1;
     this.time = 0;
-    this.attackCooldown = 0.9;
+    this.attackCooldown = rand(1.2, 1.6);
     this.attack = null;
     this.attackIndex = 0;
     this.hitFlash = 0;
@@ -695,7 +695,7 @@ class Boss {
       if (progress >= 1) {
         this.y = this.targetY;
         this.entering = false;
-        this.attackCooldown = 0.9;
+        this.attackCooldown = rand(1.2, 1.6);
         game.waveState = "boss";
         game.screenShake = Math.max(game.screenShake, 0.42);
         game.explosion(this.x, this.y + 62, this.phase === 3 ? "#ff596a" : "#65eaff", 0.72);
@@ -731,8 +731,11 @@ class Boss {
       this.attack.targetY = game.player.y;
       this.attack.lines = this.crossLines(this.attack.targetX, this.attack.targetY, 0, 0, this.attack.beamWidth);
     }
-    if (type === "fan") this.attack.total = this.phase === 3 ? 32 : 28;
-    if (type === "fan") this.attack.rounds = 2;
+    if (type === "fan") {
+      this.attack.total = this.phase === 3 ? 32 : 28;
+      this.attack.rounds = 2;
+      this.attack.roundTargets = [];
+    }
     if (type === "radial") this.attack.rounds = 3;
     if (type === "parallel") this.attack.beams = 11;
     game.addParticles(this.x, this.y + 18, this.phase === 3 ? "#ff596a" : "#65eaff", 8, 0.35);
@@ -797,16 +800,22 @@ class Boss {
         const shotInRound = a.shots % a.total;
         const scheduledAt = firstShot + round * (a.total * shotInterval + roundGap) + shotInRound * shotInterval;
         if (a.elapsed < scheduledAt) break;
-          const side = shotInRound % 2 === 0 ? -1 : 1;
-          const index = Math.floor(shotInRound / 2);
-          const countPerSide = a.total / 2;
-          const spread = 0.88;
-          const angle = side === -1
-            ? Math.PI / 2 - spread / 2 + (index / (countPerSide - 1)) * spread
-            : Math.PI / 2 + spread / 2 - (index / (countPerSide - 1)) * spread;
-          const originX = this.x + side * 126;
-          this.spawnBullet(game, originX, this.y + 34, angle, 164, 5, "#d9a5ff", 4);
-          a.shots++;
+        if (!a.roundTargets[round]) {
+          a.roundTargets[round] = { x: game.player.x, y: game.player.y };
+        }
+        const target = a.roundTargets[round];
+        const side = shotInRound % 2 === 0 ? -1 : 1;
+        const index = Math.floor(shotInRound / 2);
+        const countPerSide = a.total / 2;
+        const spread = 0.88;
+        const originX = this.x + side * 126;
+        const originY = this.y + 34;
+        const baseAngle = Math.atan2(target.y - originY, target.x - originX);
+        const spreadOffset = side === -1
+          ? -spread / 2 + (index / (countPerSide - 1)) * spread
+          : spread / 2 - (index / (countPerSide - 1)) * spread;
+        this.spawnBullet(game, originX, originY, baseAngle + spreadOffset, 164, 5, "#d9a5ff", 4);
+        a.shots++;
       }
       const lastShotAt = firstShot + (a.rounds - 1) * (a.total * shotInterval + roundGap) + (a.total - 1) * shotInterval;
       if (a.shots >= totalShots && a.elapsed > lastShotAt + 0.35) this.finishAttack();
@@ -836,7 +845,13 @@ class Boss {
 
   finishAttack() {
     this.attack = null;
-    this.attackCooldown = this.phase === 3 ? rand(0.75, 1.15) : rand(1.05, 1.55);
+    const cooldownByPhase = {
+      1: [1.2, 1.6],
+      2: [0.9, 1.2],
+      3: [0.6, 0.9],
+    };
+    const [minCooldown, maxCooldown] = cooldownByPhase[this.phase];
+    this.attackCooldown = rand(minCooldown, maxCooldown);
   }
 
   crossLines(targetX, targetY, leftRotation = 0, rightRotation = 0, width = 10) {
