@@ -727,7 +727,7 @@ class Boss {
     this.attack = { type, elapsed: 0, fired: false, shots: 0, nextShot: 0, activeUntil: 0, lines: [] };
     if (type === "cross") {
       this.attack.warningDuration = 0.45;
-      this.attack.sweepDuration = this.phase === 3 ? 1.5 : 1.8;
+      this.attack.sweepDuration = this.phase === 3 ? 1.8 : 2.1;
       this.attack.sweepAngle = Math.PI * 35 / 180;
       this.attack.beamWidth = this.phase === 3 ? 12 : 10;
       this.attack.targetX = game.player.x;
@@ -1387,7 +1387,6 @@ class Game {
     this.bossWarmupSpawned = 0;
     this.spawnTimer = 0.25;
     this.waveState = "bossWarmup";
-    this.floatTexts.push(new FloatText(W / 2, H / 2, "BOSS关预热", "#ff9f66", 26));
   }
 
   startCampaignBossIntro() {
@@ -2407,7 +2406,7 @@ class Game {
       ctx.fillStyle = "#9fd8ff";
       ctx.shadowColor = "#4dd0ff";
       ctx.shadowBlur = 18;
-      ctx.fillText(this.isBossWave(next) ? "BOSS关准备中" : "第 " + next + " 波来袭", W / 2, H / 2 - 20);
+      if (!this.isBossWave(next)) ctx.fillText("第 " + next + " 波来袭", W / 2, H / 2 - 20);
       ctx.shadowBlur = 0;
       ctx.globalAlpha = 1;
     }
@@ -2654,9 +2653,6 @@ class Game {
         ctx.font = "bold 20px 'Segoe UI', sans-serif";
         ctx.fillStyle = "#ff9f66";
         ctx.fillText("BOSS关", W - 16, 32);
-        ctx.font = "15px 'Segoe UI', sans-serif";
-        ctx.fillStyle = "#ffcf9f";
-        ctx.fillText("预热阶段", W - 16, 54);
       }
     } else {
       // 金币 & 波次（右上）
